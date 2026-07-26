@@ -3,7 +3,12 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-from dhanhq import dhanhq
+
+# Import DhanHQ SDK
+try:
+    from dhanhq import DhanContext, dhanhq
+except ImportError:
+    from dhanhq import dhanhq
 
 # ---------------------------------------------------------
 # 1. PAGE LAYOUT & AUTHENTICATION
@@ -16,11 +21,16 @@ st.set_page_config(
 st.title("⚡ Nifty Options Analytics Desk")
 
 # Fetch credentials securely from Streamlit Secrets
-CLIENT_ID = st.secrets["DHAN_CLIENT_ID"]
-ACCESS_TOKEN = st.secrets["DHAN_ACCESS_TOKEN"]
+CLIENT_ID = str(st.secrets["DHAN_CLIENT_ID"]).strip()
+ACCESS_TOKEN = str(st.secrets["DHAN_ACCESS_TOKEN"]).strip()
 
-# Initialize Dhan API Client
-dhan = dhanhq(CLIENT_ID, ACCESS_TOKEN)
+# Initialize Dhan API Client (Compatible with both old and new dhanhq versions)
+try:
+    dhan_context = DhanContext(CLIENT_ID, ACCESS_TOKEN)
+    dhan = dhanhq(dhan_context)
+except Exception:
+    dhan = dhanhq(CLIENT_ID, ACCESS_TOKEN)
+
 NIFTY_SECURITY_ID = 13  # Security ID for NIFTY 50 Index
 
 
@@ -30,16 +40,27 @@ NIFTY_SECURITY_ID = 13  # Security ID for NIFTY 50 Index
 @st.cache_data(ttl=3)
 def fetch_option_chain(expiry_date):
     """Fetches full option chain and processes OI, IV, and Greeks from DhanHQ API."""
-    response = dhan.get_option_chain(
-        underlying_scrip=NIFTY_SECURITY_ID,
-        underlying_seg="NSE_IND",
-        expiry=expiry_date,
-    )
+    try:
+        response = dhan.get_option_chain(
+            underlying_scrip=NIFTY_SECURITY_ID,
+            underlying_seg="NSE_IND",
+            expiry=expiry_date,
+        )
+    except Exception:
+        # Fallback for alternative SDK parameter naming conventions
+        try:
+            response = dhan.get_option_chain(
+                underlying_security_id=str(NIFTY_SECURITY_ID),
+                underlying_type="INDEX",
+                expiry_date=expiry_date,
+            )
+        except Exception:
+            return None, 0.0
 
-    if response.get("status") != "success":
+    if not isinstance(response, dict) or response.get("status") != "success":
         return None, 0.0
 
-    data = response["data"]
+    data = response.get("data", {})
     spot_price = float(data.get("last_price", 0.0))
     oc_raw = data.get("oc", {})
 
@@ -80,7 +101,6 @@ def fetch_option_chain(expiry_date):
 # ---------------------------------------------------------
 st.sidebar.header("Settings")
 
-# Dynamic date picker for expiry (defaulting to nearest upcoming Thursday)
 today = datetime.date.today()
 days_until_thursday = (3 - today.weekday()) % 7
 default_expiry = today + datetime.timedelta(days=days_until_thursday)
@@ -100,13 +120,11 @@ df_oc, spot_price = fetch_option_chain(selected_expiry)
 if df_oc is not None and not df_oc.empty:
     atm_strike = round(spot_price / 50) * 50
 
-    # Filter strikes near ATM (+/- 500 points) for focused analysis
     df_filtered = df_oc[
         (df_oc["Strike"] >= atm_strike - 500)
         & (df_oc["Strike"] <= atm_strike + 500)
     ].copy()
 
-    # Calculation of Key Overview Metrics
     total_call_oi = df_oc["CE_OI"].sum()
     total_put_oi = df_oc["PE_OI"].sum()
     total_pcr = total_put_oi / total_call_oi if total_call_oi > 0 else 0.0
@@ -121,9 +139,6 @@ if df_oc is not None and not df_oc.empty:
 
     st.markdown("---")
 
-    # ---------------------------------------------------------
-    # TABBED INTERFACE FOR ADVANCED ANALYTICS
-    # ---------------------------------------------------------
     tab1, tab2, tab3, tab4 = st.tabs(
         [
             "📈 OI & OI Change",
@@ -133,7 +148,6 @@ if df_oc is not None and not df_oc.empty:
         ]
     )
 
-    # TAB 1: Change in Open Interest
     with tab1:
         st.subheader("Intraday Open Interest Change (Call vs Put)")
         fig_oi = go.Figure()
@@ -161,7 +175,6 @@ if df_oc is not None and not df_oc.empty:
         )
         st.plotly_chart(fig_oi, use_container_width=True)
 
-    # TAB 2: IV Spread (Call IV - Put IV)
     with tab2:
         st.subheader("Implied Volatility Spread (Call IV - Put IV)")
         df_filtered["IV_Spread"] = df_filtered["CE_IV"] - df_filtered["PE_IV"]
@@ -186,7 +199,6 @@ if df_oc is not None and not df_oc.empty:
         )
         st.plotly_chart(fig_iv, use_container_width=True)
 
-    # TAB 3: ATM IV Curve Across Strikes
     with tab3:
         st.subheader("ATM Implied Volatility Curve Across Strikes")
         fig_term = go.Figure()
@@ -215,7 +227,6 @@ if df_oc is not None and not df_oc.empty:
         )
         st.plotly_chart(fig_term, use_container_width=True)
 
-    # TAB 4: Strike-Wise PCR
     with tab4:
         st.subheader("Strike-Wise Put-Call Ratio")
         df_filtered["Strike_PCR"] = df_filtered.apply(
@@ -241,7 +252,6 @@ if df_oc is not None and not df_oc.empty:
         )
         st.plotly_chart(fig_pcr, use_container_width=True)
 
-    # Clean Raw Data Table
     st.subheader("📋 Filtered Option Chain Data")
     st.dataframe(
         df_filtered[
