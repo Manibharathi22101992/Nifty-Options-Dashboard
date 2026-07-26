@@ -4,14 +4,14 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-# Import DhanHQ SDK
+# Import DhanHQ SDK safely
 try:
     from dhanhq import DhanContext, dhanhq
 except ImportError:
     from dhanhq import dhanhq
 
 # ---------------------------------------------------------
-# 1. PAGE LAYOUT & AUTHENTICATION
+# 1. PAGE SETUP & AUTHENTICATION
 # ---------------------------------------------------------
 st.set_page_config(
     page_title="Nifty Options Desk",
@@ -21,33 +21,58 @@ st.set_page_config(
 st.title("⚡ Nifty Options Analytics Desk")
 
 # Fetch credentials securely from Streamlit Secrets
-CLIENT_ID = str(st.secrets["DHAN_CLIENT_ID"]).strip()
-ACCESS_TOKEN = str(st.secrets["DHAN_ACCESS_TOKEN"]).strip()
+CLIENT_ID = str(st.secrets.get("DHAN_CLIENT_ID", "")).strip()
+ACCESS_TOKEN = str(st.secrets.get("DHAN_ACCESS_TOKEN", "")).strip()
 
-# Initialize Dhan API Client (Compatible with both old and new dhanhq versions)
+# Initialize Dhan Client
 try:
-    dhan_context = DhanContext(CLIENT_ID, ACCESS_TOKEN)
-    dhan = dhanhq(dhan_context)
+    context = DhanContext(CLIENT_ID, ACCESS_TOKEN)
+    dhan = dhanhq(context)
 except Exception:
     dhan = dhanhq(CLIENT_ID, ACCESS_TOKEN)
 
-NIFTY_SECURITY_ID = 13  # Security ID for NIFTY 50 Index
+NIFTY_SECURITY_ID = 13  # NIFTY 50 Index Security ID
 
 
 # ---------------------------------------------------------
-# 2. DATA FETCHING FUNCTION
+# 2. DATA FETCHING ENGINE
 # ---------------------------------------------------------
+@st.cache_data(ttl=300)
+def fetch_expiry_list():
+    """Fetches valid expiry dates from Dhan for Nifty."""
+    try:
+        if hasattr(dhan, "expiry_list"):
+            res = dhan.expiry_list(
+                under_security_id=NIFTY_SECURITY_ID,
+                under_exchange_segment="IDX_I",
+            )
+        elif hasattr(dhan, "get_expiry_list"):
+            res = dhan.get_expiry_list(NIFTY_SECURITY_ID, "IDX_I")
+        else:
+            res = None
+
+        if isinstance(res, dict) and res.get("status") == "success":
+            return res.get("data", [])
+        elif isinstance(res, list):
+            return res
+    except Exception:
+        pass
+    return []
+
+
 @st.cache_data(ttl=3)
 def fetch_option_chain(expiry_date):
-    """Fetches full option chain and processes OI, IV, and Greeks from DhanHQ API."""
+    """Fetches option chain using DhanHQ API v2 standards."""
+    response = None
+
+    # Primary DhanHQ API method signatures for Option Chain
     try:
-        response = dhan.get_option_chain(
-            underlying_scrip=NIFTY_SECURITY_ID,
-            underlying_seg="NSE_IND",
+        response = dhan.option_chain(
+            under_security_id=NIFTY_SECURITY_ID,
+            under_exchange_segment="IDX_I",
             expiry=expiry_date,
         )
     except Exception:
-        # Fallback for alternative SDK parameter naming conventions
         try:
             response = dhan.get_option_chain(
                 underlying_security_id=str(NIFTY_SECURITY_ID),
@@ -55,14 +80,27 @@ def fetch_option_chain(expiry_date):
                 expiry_date=expiry_date,
             )
         except Exception:
-            return None, 0.0
+            return None, 0.0, "Failed to connect to Dhan API endpoint."
 
-    if not isinstance(response, dict) or response.get("status") != "success":
-        return None, 0.0
+    if not isinstance(response, dict):
+        return None, 0.0, "Invalid response received from API."
+
+    if response.get("status") != "success":
+        error_msg = response.get(
+            "remarks", "API call failed. Check token validity or Data API plan."
+        )
+        return None, 0.0, error_msg
 
     data = response.get("data", {})
     spot_price = float(data.get("last_price", 0.0))
     oc_raw = data.get("oc", {})
+
+    if not oc_raw:
+        return (
+            None,
+            spot_price,
+            f"No option chain contracts found for expiry {expiry_date}.",
+        )
 
     records = []
     for strike, details in oc_raw.items():
@@ -93,7 +131,7 @@ def fetch_option_chain(expiry_date):
         )
 
     df = pd.DataFrame(records).sort_values("Strike").reset_index(drop=True)
-    return df, spot_price
+    return df, spot_price, None
 
 
 # ---------------------------------------------------------
@@ -101,13 +139,18 @@ def fetch_option_chain(expiry_date):
 # ---------------------------------------------------------
 st.sidebar.header("Settings")
 
-today = datetime.date.today()
-days_until_thursday = (3 - today.weekday()) % 7
-default_expiry = today + datetime.timedelta(days=days_until_thursday)
-
-selected_expiry = st.sidebar.date_input(
-    "Select Expiry Date", default_expiry
-).strftime("%Y-%m-%d")
+# Dynamic Expiry Date Selection
+expiries = fetch_expiry_list()
+if expiries:
+    selected_expiry = st.sidebar.selectbox("Select Expiry Date", expiries)
+else:
+    # Fallback to date picker if expiry list fails
+    today = datetime.date.today()
+    days_until_thursday = (3 - today.weekday()) % 7
+    default_expiry = today + datetime.timedelta(days=days_until_thursday)
+    selected_expiry = st.sidebar.date_input(
+        "Select Expiry Date", default_expiry
+    ).strftime("%Y-%m-%d")
 
 if st.sidebar.button("🔄 Refresh Data"):
     st.cache_data.clear()
@@ -115,11 +158,17 @@ if st.sidebar.button("🔄 Refresh Data"):
 # ---------------------------------------------------------
 # 4. DASHBOARD ANALYTICS & VISUALS
 # ---------------------------------------------------------
-df_oc, spot_price = fetch_option_chain(selected_expiry)
+df_oc, spot_price, error_remark = fetch_option_chain(selected_expiry)
 
-if df_oc is not None and not df_oc.empty:
+if error_remark:
+    st.error(f"⚠️ **Error fetching data:** {error_remark}")
+    st.info(
+        "💡 **Quick Check:** Has your Dhan Access Token expired? Toggling 'Data API' on in your DhanHQ portal or generating a fresh token usually solves this."
+    )
+elif df_oc is not None and not df_oc.empty:
     atm_strike = round(spot_price / 50) * 50
 
+    # Filter strikes near ATM (+/- 500 points)
     df_filtered = df_oc[
         (df_oc["Strike"] >= atm_strike - 500)
         & (df_oc["Strike"] <= atm_strike + 500)
@@ -139,6 +188,7 @@ if df_oc is not None and not df_oc.empty:
 
     st.markdown("---")
 
+    # TABBED ANALYTICS
     tab1, tab2, tab3, tab4 = st.tabs(
         [
             "📈 OI & OI Change",
@@ -148,6 +198,7 @@ if df_oc is not None and not df_oc.empty:
         ]
     )
 
+    # TAB 1: Intraday OI Change
     with tab1:
         st.subheader("Intraday Open Interest Change (Call vs Put)")
         fig_oi = go.Figure()
@@ -175,6 +226,7 @@ if df_oc is not None and not df_oc.empty:
         )
         st.plotly_chart(fig_oi, use_container_width=True)
 
+    # TAB 2: IV Spread (Call IV - Put IV)
     with tab2:
         st.subheader("Implied Volatility Spread (Call IV - Put IV)")
         df_filtered["IV_Spread"] = df_filtered["CE_IV"] - df_filtered["PE_IV"]
@@ -199,6 +251,7 @@ if df_oc is not None and not df_oc.empty:
         )
         st.plotly_chart(fig_iv, use_container_width=True)
 
+    # TAB 3: ATM IV Curve
     with tab3:
         st.subheader("ATM Implied Volatility Curve Across Strikes")
         fig_term = go.Figure()
@@ -227,6 +280,7 @@ if df_oc is not None and not df_oc.empty:
         )
         st.plotly_chart(fig_term, use_container_width=True)
 
+    # TAB 4: Strike-Wise PCR
     with tab4:
         st.subheader("Strike-Wise Put-Call Ratio")
         df_filtered["Strike_PCR"] = df_filtered.apply(
@@ -252,7 +306,8 @@ if df_oc is not None and not df_oc.empty:
         )
         st.plotly_chart(fig_pcr, use_container_width=True)
 
-    st.subheader("📋 Filtered Option Chain Data")
+    # Raw Data Table
+    st.subheader("📋 Option Chain Table")
     st.dataframe(
         df_filtered[
             [
@@ -268,9 +323,4 @@ if df_oc is not None and not df_oc.empty:
             ]
         ],
         use_container_width=True,
-    )
-
-else:
-    st.error(
-        "Unable to fetch option chain data. Please check your Dhan API credentials or verify if market feeds are active."
     )
