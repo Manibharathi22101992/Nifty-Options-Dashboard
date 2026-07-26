@@ -11,7 +11,7 @@ from streamlit_autorefresh import st_autorefresh
 # 1. PAGE SETUP & INSTITUTIONAL STYLING
 # ---------------------------------------------------------
 st.set_page_config(
-    page_title="Nifty GEX Desk | Dhan API",
+    page_title="Nifty Quant & GEX Desk | Dhan API",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -70,9 +70,9 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.title("⚡ NIFTY 50 Gamma Exposure (GEX) Monitor")
+st.title("⚡ NIFTY 50 Quantitative & GEX Desk")
 
-# API Secrets
+# API Credentials
 CLIENT_ID = (
     str(st.secrets.get("DHAN_CLIENT_ID", ""))
     .strip()
@@ -96,12 +96,9 @@ NIFTY_LOT_SIZE = 25  # Standard Nifty contract lot size
 
 
 # ---------------------------------------------------------
-# 2. PURE-MATH BLACK-SCHOLES GREEK ENGINE
+# 2. BLACK-SCHOLES GREEK ENGINE
 # ---------------------------------------------------------
-def calculate_bs_greeks(
-    S, K, T, sigma, r=0.07
-):
-    """Fallback calculation for Gamma, Vanna, and Charm if API Greeks are zero."""
+def calculate_bs_greeks(S, K, T, sigma, r=0.07):
     if T <= 1e-5 or sigma <= 1e-4 or S <= 0 or K <= 0:
         return 0.0, 0.0, 0.0
 
@@ -110,19 +107,11 @@ def calculate_bs_greeks(
             sigma * math.sqrt(T)
         )
         d2 = d1 - sigma * math.sqrt(T)
-
         pdf_d1 = (1.0 / math.sqrt(2 * math.pi)) * math.exp(-0.5 * d1 * d1)
 
-        # Gamma
         gamma = pdf_d1 / (S * sigma * math.sqrt(T))
-
-        # Vanna = d(Vega)/dS = -pdf(d1) * d2 / sigma
         vanna = -pdf_d1 * d2 / sigma
-
-        # Charm = d(Delta)/dt
-        charm = -pdf_d1 * (
-            2 * r * math.sqrt(T) - d2 * sigma
-        ) / (2 * T * sigma)
+        charm = -pdf_d1 * (2 * r * math.sqrt(T) - d2 * sigma) / (2 * T * sigma)
 
         return gamma, vanna, charm
     except Exception:
@@ -130,7 +119,7 @@ def calculate_bs_greeks(
 
 
 # ---------------------------------------------------------
-# 3. DIRECT REST API DATA ENGINE WITH GEX CALCULATIONS
+# 3. DIRECT REST API DATA ENGINE
 # ---------------------------------------------------------
 @st.cache_data(ttl=3)
 def fetch_gex_option_chain(expiry_date):
@@ -163,7 +152,6 @@ def fetch_gex_option_chain(expiry_date):
                     f"No contracts returned for expiry {expiry_date}.",
                 )
 
-            # Calculate Time to Expiry in Years
             exp_date_obj = datetime.datetime.strptime(
                 expiry_date, "%Y-%m-%d"
             ).date()
@@ -172,7 +160,7 @@ def fetch_gex_option_chain(expiry_date):
 
             records = []
             for strike_str, details in oc_raw.items():
-                strike = float(strike_str)
+                strike = int(float(strike_str))  # Ensure strict integer strike
                 ce = details.get("ce", {})
                 pe = details.get("pe", {})
 
@@ -188,7 +176,6 @@ def fetch_gex_option_chain(expiry_date):
                 ce_gamma = float(ce.get("greeks", {}).get("gamma", 0))
                 pe_gamma = float(pe.get("greeks", {}).get("gamma", 0))
 
-                # Fallback to pure-math Black-Scholes if Gamma is 0
                 if ce_gamma <= 0 and ce_iv > 0:
                     ce_gamma, ce_vanna, ce_charm = calculate_bs_greeks(
                         spot_price, strike, T_years, ce_iv
@@ -207,10 +194,7 @@ def fetch_gex_option_chain(expiry_date):
                         spot_price, strike, T_years, max(pe_iv, 0.15)
                     )
 
-                # ---------------------------------------------------------
-                # GEX, DEX, VEX, CHEX FORMULAS (in ₹ Lakhs)
-                # ---------------------------------------------------------
-                # Call GEX is positive (dealers long calls)
+                # GEX Calculations (₹ Lakhs)
                 call_gex = (
                     ce_oi
                     * ce_gamma
@@ -219,7 +203,6 @@ def fetch_gex_option_chain(expiry_date):
                     * NIFTY_LOT_SIZE
                     / 1e5
                 )
-                # Put GEX is negative (dealers short puts)
                 put_gex = (
                     -pe_oi
                     * pe_gamma
@@ -230,20 +213,11 @@ def fetch_gex_option_chain(expiry_date):
                 )
                 net_gex = call_gex + put_gex
 
-                # Delta Exposure (DEX)
-                call_dex = ce_oi * ce_delta * spot_price * NIFTY_LOT_SIZE / 1e5
-                put_dex = pe_oi * pe_delta * spot_price * NIFTY_LOT_SIZE / 1e5
-                net_dex = call_dex + put_dex
-
-                # Vanna Exposure (VEX) - Volatility sensitivity
-                net_vex = (
-                    (ce_oi * ce_vanna) - (pe_oi * pe_vanna)
-                ) * NIFTY_LOT_SIZE / 1e3
-
-                # Charm Exposure (CHEX) - Time decay flow
-                net_chex = (
-                    (ce_oi * ce_charm) - (pe_oi * pe_charm)
-                ) * NIFTY_LOT_SIZE / 1e3
+                # Delta-Weighted OI Calculations
+                # Note: PE Delta is negative from options API
+                ce_delta_oi = ce_oi * ce_delta
+                pe_delta_oi = pe_oi * pe_delta
+                net_delta_oi = ce_delta_oi + pe_delta_oi
 
                 records.append(
                     {
@@ -253,14 +227,17 @@ def fetch_gex_option_chain(expiry_date):
                         "CE_OI": ce_oi,
                         "PE_OI": pe_oi,
                         "Total_OI": ce_oi + pe_oi,
+                        "CE_Delta": ce_delta,
+                        "PE_Delta": pe_delta,
+                        "CE_Delta_OI": ce_delta_oi,
+                        "PE_Delta_OI": pe_delta_oi,
+                        "Net_Delta_OI": net_delta_oi,
                         "Call_GEX": call_gex,
                         "Put_GEX": put_gex,
                         "Net_GEX": net_gex,
-                        "Net_DEX": net_dex,
-                        "Net_VEX": net_vex,
-                        "Net_CHEX": net_chex,
                         "CE_IV": ce_iv * 100.0,
                         "PE_IV": pe_iv * 100.0,
+                        "IV_Spread": (ce_iv * 100.0) - (pe_iv * 100.0),
                     }
                 )
 
@@ -299,34 +276,41 @@ selected_expiry = st.sidebar.date_input(
     "Expiry Date", default_expiry
 ).strftime("%Y-%m-%d")
 
+# Fetch GEX Data first to populate strike list in sidebar
+df_oc, spot_price, error_remark = fetch_gex_option_chain(selected_expiry)
+
+# Target Strike Selector for ATM / Selected IV Spread Tool
+selected_target_strike = None
+if df_oc is not None and not df_oc.empty:
+    atm_strike_val = int(round(spot_price / 50) * 50)
+    all_strikes = df_oc["Strike"].tolist()
+
+    default_index = (
+        all_strikes.index(atm_strike_val) if atm_strike_val in all_strikes else 0
+    )
+    selected_target_strike = st.sidebar.selectbox(
+        "Target Strike (IV Spread)", all_strikes, index=default_index
+    )
+
 if st.sidebar.button("🔄 Manual Refresh"):
     st.cache_data.clear()
 
-# Fetch GEX Data
-df_oc, spot_price, error_remark = fetch_gex_option_chain(selected_expiry)
-
 
 # ---------------------------------------------------------
-# 5. GEX ANALYTICS ENGINE & DASHBOARD RENDER
+# 5. DASHBOARD RENDER & TOOLS
 # ---------------------------------------------------------
 if error_remark:
     st.error(f"⚠️ **Dhan Server Error:** {error_remark}")
 elif df_oc is not None and not df_oc.empty:
-    atm_strike = round(spot_price / 50) * 50
+    atm_strike = int(round(spot_price / 50) * 50)
 
-    # 1. Identify Key Levels
-    call_wall_strike = df_oc.loc[df_oc["Call_GEX"].idxmax()]["Strike"]
-    put_wall_strike = df_oc.loc[df_oc["Put_GEX"].idxmin()]["Strike"]
-    max_pos_gex_strike = df_oc.loc[df_oc["Net_GEX"].idxmax()]["Strike"]
-    max_neg_gex_strike = df_oc.loc[df_oc["Net_GEX"].idxmin()]["Strike"]
-    highest_oi_strike = df_oc.loc[df_oc["Total_OI"].idxmax()]["Strike"]
+    # 1. Key Levels Identification
+    call_wall_strike = int(df_oc.loc[df_oc["Call_GEX"].idxmax()]["Strike"])
+    put_wall_strike = int(df_oc.loc[df_oc["Put_GEX"].idxmin()]["Strike"])
 
-    # 2. Calculate Gamma Flip Level (Interpolated zero crossing of cumulative Net GEX)
+    # 2. Gamma Flip Calculation
     df_sorted = df_oc.sort_values("Strike").copy()
-    df_sorted["Cum_Net_GEX"] = df_sorted["Net_GEX"].cumsum()
-
-    # Find where sign flips
-    gamma_flip_strike = spot_price  # default
+    gamma_flip_strike = int(spot_price)
     for i in range(1, len(df_sorted)):
         prev_val = df_sorted.iloc[i - 1]["Net_GEX"]
         curr_val = df_sorted.iloc[i]["Net_GEX"]
@@ -337,10 +321,21 @@ elif df_oc is not None and not df_oc.empty:
                 df_sorted.iloc[i - 1]["Strike"],
                 df_sorted.iloc[i]["Strike"],
             )
-            gamma_flip_strike = (s1 + s2) / 2.0
+            gamma_flip_strike = int((s1 + s2) / 2.0)
             break
 
-    # 3. Determine Dealer Gamma Regime
+    # 3. Selected Target / ATM IV Spread Tool Metrics
+    target_row = df_oc[df_oc["Strike"] == selected_target_strike]
+    if not target_row.empty:
+        target_ce_iv = target_row["CE_IV"].values[0]
+        target_pe_iv = target_row["PE_IV"].values[0]
+        target_iv_spread = target_ce_iv - target_pe_iv
+    else:
+        target_ce_iv, target_pe_iv, target_iv_spread = 0.0, 0.0, 0.0
+
+    # 4. Total Net Delta-Weighted Open Interest
+    total_net_delta_oi = df_oc["Net_Delta_OI"].sum()
+
     total_net_gex = df_oc["Net_GEX"].sum()
     is_pos_gamma = spot_price >= gamma_flip_strike or total_net_gex > 0
     regime_text = (
@@ -348,11 +343,8 @@ elif df_oc is not None and not df_oc.empty:
         if is_pos_gamma
         else "NEGATIVE GAMMA (AMPLIFICATION / HIGH VOL)"
     )
-    flip_distance_pct = (
-        (spot_price - gamma_flip_strike) / gamma_flip_strike
-    ) * 100.0
 
-    # TOP METRICS CARDS
+    # TOP METRICS BANNER
     c1, c2, c3, c4, c5 = st.columns(5)
 
     with c1:
@@ -361,32 +353,33 @@ elif df_oc is not None and not df_oc.empty:
             <div class="metric-card">
                 <div class="metric-title">NIFTY SPOT</div>
                 <div class="metric-value">₹{spot_price:,.2f}</div>
-                <div class="metric-sub sub-amber">ATM: {atm_strike:.0f}</div>
+                <div class="metric-sub sub-amber">ATM: {atm_strike}</div>
             </div>
             """,
             unsafe_allow_html=True,
         )
 
     with c2:
-        flip_class = "sub-green" if spot_price >= gamma_flip_strike else "sub-red"
+        spread_class = "sub-green" if target_iv_spread >= 0 else "sub-red"
         st.markdown(
             f"""
             <div class="metric-card">
-                <div class="metric-title">GAMMA FLIP LEVEL</div>
-                <div class="metric-value">₹{gamma_flip_strike:,.0f}</div>
-                <div class="metric-sub {flip_class}">Dist: {flip_distance_pct:+.2f}%</div>
+                <div class="metric-title">{selected_target_strike} IV SPREAD</div>
+                <div class="metric-value">{target_iv_spread:+.2f}%</div>
+                <div class="metric-sub {spread_class}">CE: {target_ce_iv:.1f}% | PE: {target_pe_iv:.1f}%</div>
             </div>
             """,
             unsafe_allow_html=True,
         )
 
     with c3:
+        delta_oi_class = "sub-green" if total_net_delta_oi >= 0 else "sub-red"
         st.markdown(
             f"""
             <div class="metric-card">
-                <div class="metric-title">CALL WALL (RESISTANCE)</div>
-                <div class="metric-value">₹{call_wall_strike:,.0f}</div>
-                <div class="metric-sub sub-red">Max Call GEX</div>
+                <div class="metric-title">NET DELTA-WEIGHTED OI</div>
+                <div class="metric-value">{total_net_delta_oi:+,.0f}</div>
+                <div class="metric-sub {delta_oi_class}">{"BULLISH BIAS" if total_net_delta_oi >= 0 else "BEARISH BIAS"}</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -396,9 +389,9 @@ elif df_oc is not None and not df_oc.empty:
         st.markdown(
             f"""
             <div class="metric-card">
-                <div class="metric-title">PUT WALL (SUPPORT)</div>
-                <div class="metric-value">₹{put_wall_strike:,.0f}</div>
-                <div class="metric-sub sub-green">Max Put GEX</div>
+                <div class="metric-title">GAMMA FLIP LEVEL</div>
+                <div class="metric-value">₹{gamma_flip_strike:,}</div>
+                <div class="metric-sub sub-blue">CW: {call_wall_strike} | PW: {put_wall_strike}</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -411,13 +404,12 @@ elif df_oc is not None and not df_oc.empty:
             <div class="metric-card">
                 <div class="metric-title">TOTAL NET GEX</div>
                 <div class="metric-value">₹{total_net_gex:,.1f}L</div>
-                <div class="metric-sub {net_gex_class}">Across Strikes</div>
+                <div class="metric-sub {net_gex_class}">Across Chain</div>
             </div>
             """,
             unsafe_allow_html=True,
         )
 
-    # DEALER REGIME STATUS BADGE
     badge_style = "regime-badge-pos" if is_pos_gamma else "regime-badge-neg"
     st.markdown(
         f'<div class="{badge_style}">DEALER REGIME: {regime_text}</div><br>',
@@ -430,190 +422,121 @@ elif df_oc is not None and not df_oc.empty:
         & (df_oc["Strike"] <= atm_strike + 500)
     ].copy()
 
+    # Convert strikes to string type to strictly force full integer labels (24300) without SI conversion (24.3k)
+    df_filtered["Strike_Label"] = df_filtered["Strike"].astype(str)
+
     # ---------------------------------------------------------
-    # TABBED GEX & EXPOSURE PANELS
+    # TABBED ANALYTICS DASHBOARD
     # ---------------------------------------------------------
     tab1, tab2, tab3, tab4 = st.tabs(
         [
+            "🎯 Net Delta-Weighted OI",
+            "⚡ Strike IV Spread Skew",
             "📊 Net GEX Profile",
-            "🎯 Call vs Put GEX Stack",
-            "⚡ Higher-Order Exposures (DEX/VEX/CHEX)",
-            "📋 Levels Summary & Data Grid",
+            "📋 Options Data Grid",
         ]
     )
 
-    # TAB 1: Net GEX Bar Chart
+    # TAB 1: Net Delta-Weighted Open Interest Tool
     with tab1:
-        st.subheader("Net Gamma Exposure (GEX) by Strike")
+        st.subheader("Net Delta-Weighted Open Interest Across Strikes")
+        fig_delta_oi = go.Figure()
+
+        colors_delta = [
+            "#26A69A" if val >= 0 else "#EF5350"
+            for val in df_filtered["Net_Delta_OI"]
+        ]
+
+        fig_delta_oi.add_trace(
+            go.Bar(
+                x=df_filtered["Strike_Label"],
+                y=df_filtered["Net_Delta_OI"],
+                marker_color=colors_delta,
+                name="Net Delta-Weighted OI",
+            )
+        )
+
+        fig_delta_oi.update_xaxes(type="category", title="Strike Price")
+        fig_delta_oi.update_layout(
+            template="plotly_dark",
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            yaxis_title="Delta-Weighted Contracts",
+        )
+        st.plotly_chart(fig_delta_oi, use_container_width=True)
+
+    # TAB 2: ATM / Strike IV Spread Tool
+    with tab2:
+        st.subheader("Implied Volatility Curve & IV Spread (Call IV - Put IV)")
+        fig_iv = go.Figure()
+
+        fig_iv.add_trace(
+            go.Scatter(
+                x=df_filtered["Strike_Label"],
+                y=df_filtered["CE_IV"],
+                name="Call IV (%)",
+                line=dict(color="#EF5350", width=2),
+            )
+        )
+        fig_iv.add_trace(
+            go.Scatter(
+                x=df_filtered["Strike_Label"],
+                y=df_filtered["PE_IV"],
+                name="Put IV (%)",
+                line=dict(color="#26A69A", width=2),
+            )
+        )
+        fig_iv.add_trace(
+            go.Scatter(
+                x=df_filtered["Strike_Label"],
+                y=df_filtered["IV_Spread"],
+                name="IV Spread (CE - PE)",
+                line=dict(color="#FFA726", width=2, dash="dot"),
+            )
+        )
+
+        fig_iv.add_hline(
+            y=0, line_dash="dash", line_color="white", opacity=0.4
+        )
+        fig_iv.update_xaxes(type="category", title="Strike Price")
+        fig_iv.update_layout(
+            template="plotly_dark",
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            yaxis_title="Volatility (%) / Spread Points",
+            legend=dict(orientation="h", y=1.1),
+        )
+        st.plotly_chart(fig_iv, use_container_width=True)
+
+    # TAB 3: Net GEX Profile
+    with tab3:
+        st.subheader("Net Gamma Exposure (GEX) Profile")
         fig_gex = go.Figure()
 
-        colors = [
+        colors_gex = [
             "#26A69A" if g >= 0 else "#EF5350" for g in df_filtered["Net_GEX"]
         ]
         fig_gex.add_trace(
             go.Bar(
-                x=df_filtered["Strike"],
+                x=df_filtered["Strike_Label"],
                 y=df_filtered["Net_GEX"],
-                marker_color=colors,
+                marker_color=colors_gex,
                 name="Net GEX (₹ Lakhs)",
             )
         )
 
-        # Key Level Reference Lines
-        fig_gex.add_vline(
-            x=spot_price,
-            line_dash="solid",
-            line_color="#FFD700",
-            annotation_text="Spot",
-        )
-        fig_gex.add_vline(
-            x=gamma_flip_strike,
-            line_dash="dash",
-            line_color="#29B6F6",
-            annotation_text="Flip",
-        )
-        fig_gex.add_vline(
-            x=call_wall_strike,
-            line_dash="dot",
-            line_color="#EF5350",
-            annotation_text="Call Wall",
-        )
-        fig_gex.add_vline(
-            x=put_wall_strike,
-            line_dash="dot",
-            line_color="#26A69A",
-            annotation_text="Put Wall",
-        )
-
+        fig_gex.update_xaxes(type="category", title="Strike Price")
         fig_gex.update_layout(
             template="plotly_dark",
             paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)",
-            xaxis_title="Strike Price",
             yaxis_title="Net GEX (₹ Lakhs / 1% Move)",
         )
         st.plotly_chart(fig_gex, use_container_width=True)
 
-    # TAB 2: Call vs Put GEX Stack
-    with tab2:
-        st.subheader("Call GEX (Positive) vs Put GEX (Negative)")
-        fig_stack = go.Figure()
-        fig_stack.add_trace(
-            go.Bar(
-                x=df_filtered["Strike"],
-                y=df_filtered["Call_GEX"],
-                name="Call GEX (+)",
-                marker_color="#EF5350",
-            )
-        )
-        fig_stack.add_trace(
-            go.Bar(
-                x=df_filtered["Strike"],
-                y=df_filtered["Put_GEX"],
-                name="Put GEX (-)",
-                marker_color="#26A69A",
-            )
-        )
-
-        fig_stack.add_vline(
-            x=spot_price,
-            line_dash="solid",
-            line_color="#FFD700",
-            annotation_text="Spot",
-        )
-        fig_stack.update_layout(
-            barmode="relative",
-            template="plotly_dark",
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
-            xaxis_title="Strike Price",
-            yaxis_title="GEX Breakdown (₹ Lakhs)",
-        )
-        st.plotly_chart(fig_stack, use_container_width=True)
-
-    # TAB 3: DEX, VEX, CHEX Stack
-    with tab3:
-        st.subheader("Higher-Order Greek Exposures")
-        g1, g2, g3 = st.columns(3)
-
-        with g1:
-            st.markdown("**Delta Exposure (DEX)**")
-            fig_dex = px.bar(
-                df_filtered,
-                x="Strike",
-                y="Net_DEX",
-                color="Net_DEX",
-                color_continuous_scale="RdYlGn",
-                template="plotly_dark",
-            )
-            fig_dex.update_layout(
-                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)"
-            )
-            st.plotly_chart(fig_dex, use_container_width=True)
-
-        with g2:
-            st.markdown("**Vanna Exposure (VEX - IV Sensitivity)**")
-            fig_vex = px.line(
-                df_filtered,
-                x="Strike",
-                y="Net_VEX",
-                markers=True,
-                template="plotly_dark",
-            )
-            fig_vex.update_traces(line_color="#FFA726")
-            fig_vex.update_layout(
-                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)"
-            )
-            st.plotly_chart(fig_vex, use_container_width=True)
-
-        with g3:
-            st.markdown("**Charm Exposure (CHEX - Time Decay)**")
-            fig_chex = px.line(
-                df_filtered,
-                x="Strike",
-                y="Net_CHEX",
-                markers=True,
-                template="plotly_dark",
-            )
-            fig_chex.update_traces(line_color="#AB47BC")
-            fig_chex.update_layout(
-                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)"
-            )
-            st.plotly_chart(fig_chex, use_container_width=True)
-
-    # TAB 4: Summary Table & Grid
+    # TAB 4: Clean Data Grid
     with tab4:
-        st.subheader("Key Levels Breakdown")
-
-        summary_data = {
-            "Key Level Metric": [
-                "Gamma Flip Level",
-                "Call Wall (Resistance)",
-                "Put Wall (Support)",
-                "Max Positive Gamma (Pin)",
-                "Max Negative Gamma (Squeeze)",
-                "Highest OI Strike (Magnet)",
-            ],
-            "Strike Price": [
-                f"₹{gamma_flip_strike:,.0f}",
-                f"₹{call_wall_strike:,.0f}",
-                f"₹{put_wall_strike:,.0f}",
-                f"₹{max_pos_gex_strike:,.0f}",
-                f"₹{max_neg_gex_strike:,.0f}",
-                f"₹{highest_oi_strike:,.0f}",
-            ],
-            "Market Role": [
-                "Price threshold where dealer regime switches long/short gamma",
-                "Heaviest Call GEX concentration; acts as strong resistance",
-                "Heaviest Put GEX concentration; acts as strong support",
-                "Strike where intraday price is most strongly pinned",
-                "Strike where a breakdown accelerates volatility squeeze",
-                "0DTE / Weekly expiry magnet strike attracting settlement",
-            ],
-        }
-        st.table(pd.DataFrame(summary_data))
-
-        st.subheader("GEX Options Data Table")
+        st.subheader("Institutional Options Chain Data Grid")
         grid_df = df_filtered[
             [
                 "Strike",
@@ -621,12 +544,13 @@ elif df_oc is not None and not df_oc.empty:
                 "PE_LTP",
                 "CE_OI",
                 "PE_OI",
-                "Call_GEX",
-                "Put_GEX",
+                "CE_Delta",
+                "PE_Delta",
+                "Net_Delta_OI",
                 "Net_GEX",
-                "Net_DEX",
                 "CE_IV",
                 "PE_IV",
+                "IV_Spread",
             ]
         ].copy()
 
@@ -638,14 +562,15 @@ elif df_oc is not None and not df_oc.empty:
                     "PE_LTP": "₹{:.2f}",
                     "CE_OI": "{:,.0f}",
                     "PE_OI": "{:,.0f}",
-                    "Call_GEX": "{:+,.1f}L",
-                    "Put_GEX": "{:+,.1f}L",
+                    "CE_Delta": "{:.2f}",
+                    "PE_Delta": "{:.2f}",
+                    "Net_Delta_OI": "{:+,.0f}",
                     "Net_GEX": "{:+,.1f}L",
-                    "Net_DEX": "{:+,.1f}L",
                     "CE_IV": "{:.1f}%",
                     "PE_IV": "{:.1f}%",
+                    "IV_Spread": "{:+.2f}%",
                 }
             ),
             use_container_width=True,
-            height=400,
+            height=450,
         )
