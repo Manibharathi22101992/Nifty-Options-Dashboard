@@ -70,9 +70,9 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.title("⚡ NIFTY 50 Quantitative & GEX Desk")
+st.title("⚡ NIFTY 50 Quant, GEX & Greek Exposure Desk")
 
-# API Credentials
+# API Secrets
 CLIENT_ID = (
     str(st.secrets.get("DHAN_CLIENT_ID", ""))
     .strip()
@@ -96,7 +96,7 @@ NIFTY_LOT_SIZE = 25  # Standard Nifty contract lot size
 
 
 # ---------------------------------------------------------
-# 2. BLACK-SCHOLES GREEK ENGINE
+# 2. BLACK-SCHOLES GREEK ENGINE (GAMMA, VANNA, CHARM)
 # ---------------------------------------------------------
 def calculate_bs_greeks(S, K, T, sigma, r=0.07):
     if T <= 1e-5 or sigma <= 1e-4 or S <= 0 or K <= 0:
@@ -119,7 +119,7 @@ def calculate_bs_greeks(S, K, T, sigma, r=0.07):
 
 
 # ---------------------------------------------------------
-# 3. DIRECT REST API DATA ENGINE
+# 3. DIRECT REST API DATA ENGINE WITH ALL EXPOSURES
 # ---------------------------------------------------------
 @st.cache_data(ttl=3)
 def fetch_gex_option_chain(expiry_date):
@@ -160,7 +160,7 @@ def fetch_gex_option_chain(expiry_date):
 
             records = []
             for strike_str, details in oc_raw.items():
-                strike = int(float(strike_str))  # Ensure strict integer strike
+                strike = int(float(strike_str))  # Force full integer strike
                 ce = details.get("ce", {})
                 pe = details.get("pe", {})
 
@@ -176,6 +176,7 @@ def fetch_gex_option_chain(expiry_date):
                 ce_gamma = float(ce.get("greeks", {}).get("gamma", 0))
                 pe_gamma = float(pe.get("greeks", {}).get("gamma", 0))
 
+                # Compute Black-Scholes higher-order Greeks
                 if ce_gamma <= 0 and ce_iv > 0:
                     ce_gamma, ce_vanna, ce_charm = calculate_bs_greeks(
                         spot_price, strike, T_years, ce_iv
@@ -213,11 +214,21 @@ def fetch_gex_option_chain(expiry_date):
                 )
                 net_gex = call_gex + put_gex
 
-                # Delta-Weighted OI Calculations
-                # Note: PE Delta is negative from options API
+                # Delta-Weighted OI & Delta Exposure (DEX)
                 ce_delta_oi = ce_oi * ce_delta
                 pe_delta_oi = pe_oi * pe_delta
                 net_delta_oi = ce_delta_oi + pe_delta_oi
+                net_dex = (
+                    (ce_oi * ce_delta) + (pe_oi * pe_delta)
+                ) * spot_price * NIFTY_LOT_SIZE / 1e5
+
+                # Vanna Exposure (VEX) & Charm Exposure (CHEX)
+                net_vex = (
+                    (ce_oi * ce_vanna) - (pe_oi * pe_vanna)
+                ) * NIFTY_LOT_SIZE / 1e3
+                net_chex = (
+                    (ce_oi * ce_charm) - (pe_oi * pe_charm)
+                ) * NIFTY_LOT_SIZE / 1e3
 
                 records.append(
                     {
@@ -229,12 +240,13 @@ def fetch_gex_option_chain(expiry_date):
                         "Total_OI": ce_oi + pe_oi,
                         "CE_Delta": ce_delta,
                         "PE_Delta": pe_delta,
-                        "CE_Delta_OI": ce_delta_oi,
-                        "PE_Delta_OI": pe_delta_oi,
                         "Net_Delta_OI": net_delta_oi,
+                        "Net_DEX": net_dex,
                         "Call_GEX": call_gex,
                         "Put_GEX": put_gex,
                         "Net_GEX": net_gex,
+                        "Net_VEX": net_vex,
+                        "Net_CHEX": net_chex,
                         "CE_IV": ce_iv * 100.0,
                         "PE_IV": pe_iv * 100.0,
                         "IV_Spread": (ce_iv * 100.0) - (pe_iv * 100.0),
@@ -276,10 +288,10 @@ selected_expiry = st.sidebar.date_input(
     "Expiry Date", default_expiry
 ).strftime("%Y-%m-%d")
 
-# Fetch GEX Data first to populate strike list in sidebar
+# Fetch GEX Data first to populate the single-strike dropdown
 df_oc, spot_price, error_remark = fetch_gex_option_chain(selected_expiry)
 
-# Target Strike Selector for ATM / Selected IV Spread Tool
+# Target Strike Selector for Single-Strike Intraday IV Spread Tool
 selected_target_strike = None
 if df_oc is not None and not df_oc.empty:
     atm_strike_val = int(round(spot_price / 50) * 50)
@@ -289,7 +301,9 @@ if df_oc is not None and not df_oc.empty:
         all_strikes.index(atm_strike_val) if atm_strike_val in all_strikes else 0
     )
     selected_target_strike = st.sidebar.selectbox(
-        "Target Strike (IV Spread)", all_strikes, index=default_index
+        "🎯 Select Strike for Intraday IV Spread",
+        all_strikes,
+        index=default_index,
     )
 
 if st.sidebar.button("🔄 Manual Refresh"):
@@ -324,18 +338,18 @@ elif df_oc is not None and not df_oc.empty:
             gamma_flip_strike = int((s1 + s2) / 2.0)
             break
 
-    # 3. Selected Target / ATM IV Spread Tool Metrics
+    # 3. Single-Strike IV Spread Calculation (Intraday Focus)
     target_row = df_oc[df_oc["Strike"] == selected_target_strike]
     if not target_row.empty:
         target_ce_iv = target_row["CE_IV"].values[0]
         target_pe_iv = target_row["PE_IV"].values[0]
         target_iv_spread = target_ce_iv - target_pe_iv
+        target_ce_ltp = target_row["CE_LTP"].values[0]
+        target_pe_ltp = target_row["PE_LTP"].values[0]
     else:
-        target_ce_iv, target_pe_iv, target_iv_spread = 0.0, 0.0, 0.0
+        target_ce_iv, target_pe_iv, target_iv_spread, target_ce_ltp, target_pe_ltp = 0.0, 0.0, 0.0, 0.0, 0.0
 
-    # 4. Total Net Delta-Weighted Open Interest
     total_net_delta_oi = df_oc["Net_Delta_OI"].sum()
-
     total_net_gex = df_oc["Net_GEX"].sum()
     is_pos_gamma = spot_price >= gamma_flip_strike or total_net_gex > 0
     regime_text = (
@@ -422,55 +436,101 @@ elif df_oc is not None and not df_oc.empty:
         & (df_oc["Strike"] <= atm_strike + 500)
     ].copy()
 
-    # Convert strikes to string type to strictly force full integer labels (24300) without SI conversion (24.3k)
+    # Force full integer formatting for strikes (24300) without SI conversion (24.3k)
     df_filtered["Strike_Label"] = df_filtered["Strike"].astype(str)
 
     # ---------------------------------------------------------
     # TABBED ANALYTICS DASHBOARD
     # ---------------------------------------------------------
-    tab1, tab2, tab3, tab4 = st.tabs(
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(
         [
-            "🎯 Net Delta-Weighted OI",
-            "⚡ Strike IV Spread Skew",
+            "🎯 Net Delta OI & DEX",
+            "⚡ Intraday Single-Strike IV Spread",
             "📊 Net GEX Profile",
+            "🌀 Higher-Order Exposures (VEX & CHEX)",
             "📋 Options Data Grid",
         ]
     )
 
-    # TAB 1: Net Delta-Weighted Open Interest Tool
+    # TAB 1: Net Delta-Weighted OI & DEX
     with tab1:
-        st.subheader("Net Delta-Weighted Open Interest Across Strikes")
-        fig_delta_oi = go.Figure()
+        d_col1, d_col2 = st.columns(2)
 
-        colors_delta = [
-            "#26A69A" if val >= 0 else "#EF5350"
-            for val in df_filtered["Net_Delta_OI"]
-        ]
-
-        fig_delta_oi.add_trace(
-            go.Bar(
-                x=df_filtered["Strike_Label"],
-                y=df_filtered["Net_Delta_OI"],
-                marker_color=colors_delta,
-                name="Net Delta-Weighted OI",
+        with d_col1:
+            st.subheader("Net Delta-Weighted Open Interest")
+            fig_delta_oi = go.Figure()
+            colors_delta = [
+                "#26A69A" if val >= 0 else "#EF5350"
+                for val in df_filtered["Net_Delta_OI"]
+            ]
+            fig_delta_oi.add_trace(
+                go.Bar(
+                    x=df_filtered["Strike_Label"],
+                    y=df_filtered["Net_Delta_OI"],
+                    marker_color=colors_delta,
+                    name="Net Delta-Weighted OI",
+                )
             )
-        )
+            fig_delta_oi.update_xaxes(type="category", title="Strike Price")
+            fig_delta_oi.update_layout(
+                template="plotly_dark",
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                yaxis_title="Delta-Weighted Contracts",
+            )
+            st.plotly_chart(fig_delta_oi, use_container_width=True)
 
-        fig_delta_oi.update_xaxes(type="category", title="Strike Price")
-        fig_delta_oi.update_layout(
-            template="plotly_dark",
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
-            yaxis_title="Delta-Weighted Contracts",
-        )
-        st.plotly_chart(fig_delta_oi, use_container_width=True)
+        with d_col2:
+            st.subheader("Delta Exposure (DEX)")
+            fig_dex = go.Figure()
+            colors_dex = [
+                "#26A69A" if val >= 0 else "#EF5350"
+                for val in df_filtered["Net_DEX"]
+            ]
+            fig_dex.add_trace(
+                go.Bar(
+                    x=df_filtered["Strike_Label"],
+                    y=df_filtered["Net_DEX"],
+                    marker_color=colors_dex,
+                    name="Net DEX (₹ Lakhs)",
+                )
+            )
+            fig_dex.update_xaxes(type="category", title="Strike Price")
+            fig_dex.update_layout(
+                template="plotly_dark",
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                yaxis_title="Net DEX (₹ Lakhs)",
+            )
+            st.plotly_chart(fig_dex, use_container_width=True)
 
-    # TAB 2: ATM / Strike IV Spread Tool
+    # TAB 2: Intraday Single-Strike IV Spread Focus Module
     with tab2:
-        st.subheader("Implied Volatility Curve & IV Spread (Call IV - Put IV)")
-        fig_iv = go.Figure()
+        st.subheader(
+            f"Intraday Focus: {selected_target_strike} Strike IV Spread Monitor"
+        )
 
-        fig_iv.add_trace(
+        col_iv1, col_iv2, col_iv3, col_iv4 = st.columns(4)
+        col_iv1.metric(
+            f"Selected Strike",
+            f"{selected_target_strike}",
+            "ATM" if selected_target_strike == atm_strike else "OTM/ITM",
+        )
+        col_iv2.metric("Call IV", f"{target_ce_iv:.2f}%", f"₹{target_ce_ltp:.2f}")
+        col_iv3.metric("Put IV", f"{target_pe_iv:.2f}%", f"₹{target_pe_ltp:.2f}")
+        col_iv4.metric(
+            "IV Spread (CE - PE)",
+            f"{target_iv_spread:+.2f}%",
+            "Call Demand Premium"
+            if target_iv_spread >= 0
+            else "Put Demand Premium",
+        )
+
+        st.markdown("---")
+        st.subheader("Full Chain IV Spread Skew (CE IV - PE IV)")
+
+        fig_iv_skew = go.Figure()
+        fig_iv_skew.add_trace(
             go.Scatter(
                 x=df_filtered["Strike_Label"],
                 y=df_filtered["CE_IV"],
@@ -478,7 +538,7 @@ elif df_oc is not None and not df_oc.empty:
                 line=dict(color="#EF5350", width=2),
             )
         )
-        fig_iv.add_trace(
+        fig_iv_skew.add_trace(
             go.Scatter(
                 x=df_filtered["Strike_Label"],
                 y=df_filtered["PE_IV"],
@@ -486,33 +546,32 @@ elif df_oc is not None and not df_oc.empty:
                 line=dict(color="#26A69A", width=2),
             )
         )
-        fig_iv.add_trace(
+        fig_iv_skew.add_trace(
             go.Scatter(
                 x=df_filtered["Strike_Label"],
                 y=df_filtered["IV_Spread"],
-                name="IV Spread (CE - PE)",
+                name="IV Spread",
                 line=dict(color="#FFA726", width=2, dash="dot"),
             )
         )
 
-        fig_iv.add_hline(
+        fig_iv_skew.add_hline(
             y=0, line_dash="dash", line_color="white", opacity=0.4
         )
-        fig_iv.update_xaxes(type="category", title="Strike Price")
-        fig_iv.update_layout(
+        fig_iv_skew.update_xaxes(type="category", title="Strike Price")
+        fig_iv_skew.update_layout(
             template="plotly_dark",
             paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)",
             yaxis_title="Volatility (%) / Spread Points",
             legend=dict(orientation="h", y=1.1),
         )
-        st.plotly_chart(fig_iv, use_container_width=True)
+        st.plotly_chart(fig_iv_skew, use_container_width=True)
 
     # TAB 3: Net GEX Profile
     with tab3:
         st.subheader("Net Gamma Exposure (GEX) Profile")
         fig_gex = go.Figure()
-
         colors_gex = [
             "#26A69A" if g >= 0 else "#EF5350" for g in df_filtered["Net_GEX"]
         ]
@@ -524,7 +583,6 @@ elif df_oc is not None and not df_oc.empty:
                 name="Net GEX (₹ Lakhs)",
             )
         )
-
         fig_gex.update_xaxes(type="category", title="Strike Price")
         fig_gex.update_layout(
             template="plotly_dark",
@@ -534,8 +592,49 @@ elif df_oc is not None and not df_oc.empty:
         )
         st.plotly_chart(fig_gex, use_container_width=True)
 
-    # TAB 4: Clean Data Grid
+    # TAB 4: Higher-Order Exposures (Restored VEX & CHEX)
     with tab4:
+        st.subheader("Higher-Order Greek Exposures (Vanna & Charm)")
+        v_col1, v_col2 = st.columns(2)
+
+        with v_col1:
+            st.markdown("**Vanna Exposure (VEX - IV Sensitivity)**")
+            fig_vex = px.line(
+                df_filtered,
+                x="Strike_Label",
+                y="Net_VEX",
+                markers=True,
+                template="plotly_dark",
+            )
+            fig_vex.update_traces(line_color="#FFA726", line_width=2)
+            fig_vex.update_xaxes(type="category", title="Strike Price")
+            fig_vex.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                yaxis_title="Net VEX",
+            )
+            st.plotly_chart(fig_vex, use_container_width=True)
+
+        with v_col2:
+            st.markdown("**Charm Exposure (CHEX - Time Decay)**")
+            fig_chex = px.line(
+                df_filtered,
+                x="Strike_Label",
+                y="Net_CHEX",
+                markers=True,
+                template="plotly_dark",
+            )
+            fig_chex.update_traces(line_color="#AB47BC", line_width=2)
+            fig_chex.update_xaxes(type="category", title="Strike Price")
+            fig_chex.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                yaxis_title="Net CHEX",
+            )
+            st.plotly_chart(fig_chex, use_container_width=True)
+
+    # TAB 5: Clean Data Grid
+    with tab5:
         st.subheader("Institutional Options Chain Data Grid")
         grid_df = df_filtered[
             [
@@ -547,7 +646,10 @@ elif df_oc is not None and not df_oc.empty:
                 "CE_Delta",
                 "PE_Delta",
                 "Net_Delta_OI",
+                "Net_DEX",
                 "Net_GEX",
+                "Net_VEX",
+                "Net_CHEX",
                 "CE_IV",
                 "PE_IV",
                 "IV_Spread",
@@ -565,7 +667,10 @@ elif df_oc is not None and not df_oc.empty:
                     "CE_Delta": "{:.2f}",
                     "PE_Delta": "{:.2f}",
                     "Net_Delta_OI": "{:+,.0f}",
+                    "Net_DEX": "{:+,.1f}L",
                     "Net_GEX": "{:+,.1f}L",
+                    "Net_VEX": "{:+,.2f}",
+                    "Net_CHEX": "{:+,.2f}",
                     "CE_IV": "{:.1f}%",
                     "PE_IV": "{:.1f}%",
                     "IV_Spread": "{:+.2f}%",
