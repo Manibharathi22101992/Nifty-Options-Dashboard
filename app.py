@@ -39,7 +39,6 @@ st.markdown(
     .sub-amber { color: #FFD700; }
     .sub-blue { color: #29B6F6; }
 
-    /* Summary Banner Styling */
     .summary-box {
         background: #121824;
         border: 1px solid #232d42;
@@ -52,6 +51,27 @@ st.markdown(
         font-weight: 700;
         color: #ffffff;
         margin-bottom: 8px;
+    }
+
+    .status-live {
+        background-color: rgba(0, 230, 118, 0.15);
+        border: 1px solid #00E676;
+        color: #00E676;
+        padding: 6px 12px;
+        border-radius: 6px;
+        font-weight: 700;
+        display: inline-block;
+        font-size: 0.85rem;
+    }
+    .status-closed {
+        background-color: rgba(255, 167, 38, 0.15);
+        border: 1px solid #FFA726;
+        color: #FFA726;
+        padding: 6px 12px;
+        border-radius: 6px;
+        font-weight: 700;
+        display: inline-block;
+        font-size: 0.85rem;
     }
 
     .regime-badge-pos {
@@ -207,7 +227,6 @@ def fetch_gex_option_chain(expiry_date):
                         spot_price, strike, T_years, max(pe_iv, 0.15)
                     )
 
-                # GEX Calculations (₹ Lakhs)
                 call_gex = (
                     ce_oi
                     * ce_gamma
@@ -226,15 +245,11 @@ def fetch_gex_option_chain(expiry_date):
                 )
                 net_gex = call_gex + put_gex
 
-                # Delta-Weighted OI & Cash DEX
                 ce_delta_oi = ce_oi * ce_delta
                 pe_delta_oi = pe_oi * pe_delta
                 net_delta_oi = ce_delta_oi + pe_delta_oi
-                net_dex = (
-                    net_delta_oi * spot_price * NIFTY_LOT_SIZE / 1e5
-                )  # in ₹ Lakhs
+                net_dex = net_delta_oi * spot_price * NIFTY_LOT_SIZE / 1e5
 
-                # VEX & CHEX
                 net_vex = (
                     (ce_oi * ce_vanna) - (pe_oi * pe_vanna)
                 ) * NIFTY_LOT_SIZE / 1e3
@@ -284,7 +299,7 @@ def fetch_gex_option_chain(expiry_date):
 
 
 # ---------------------------------------------------------
-# 4. CONTROLS & SESSION STATE MEMORY
+# 4. IST MARKET HOURS ENGINE & SESSION TIME-SERIES MEMORY
 # ---------------------------------------------------------
 st.sidebar.header("⚙️ Controls & Feeds")
 
@@ -292,12 +307,23 @@ auto_refresh = st.sidebar.checkbox("Enable Live Auto-Refresh (5s)", value=True)
 if auto_refresh:
     st_autorefresh(interval=5000, key="datarefresh")
 
-today = datetime.date.today()
-days_until_thursday = (3 - today.weekday()) % 7
-default_expiry = today + datetime.timedelta(days=days_until_thursday)
+# IST Time Zone Handling
+IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+now_ist = datetime.datetime.now(IST)
+today_date_str = now_ist.strftime("%Y-%m-%d")
+now_time_str = now_ist.strftime("%H:%M:%S")
+
+# Check NSE Trading Hours (Mon-Fri, 09:15 to 15:30 IST)
+is_weekday = now_ist.weekday() < 5
+m_open = now_ist.replace(hour=9, minute=15, second=0, microsecond=0)
+m_close = now_ist.replace(hour=15, minute=30, second=0, microsecond=0)
+is_market_live = is_weekday and (m_open <= now_ist <= m_close)
+
+days_until_thursday = (3 - now_ist.weekday()) % 7
+default_expiry = (now_ist + datetime.timedelta(days=days_until_thursday)).strftime("%Y-%m-%d")
 
 selected_expiry = st.sidebar.date_input(
-    "Expiry Date", default_expiry
+    "Expiry Date", datetime.datetime.strptime(default_expiry, "%Y-%m-%d")
 ).strftime("%Y-%m-%d")
 
 df_oc, spot_price, error_remark = fetch_gex_option_chain(selected_expiry)
@@ -316,14 +342,15 @@ if df_oc is not None and not df_oc.empty:
         index=default_index,
     )
 
+# Session State History Memory
 if "iv_spread_history" not in st.session_state:
     st.session_state["iv_spread_history"] = pd.DataFrame(
-        columns=["Time", "Strike", "CE_IV", "PE_IV", "IV_Spread", "Spot"]
+        columns=["Date", "Time", "Strike", "CE_IV", "PE_IV", "IV_Spread", "Spot"]
     )
 
 if st.sidebar.button("🗑️ Clear Intraday History"):
     st.session_state["iv_spread_history"] = pd.DataFrame(
-        columns=["Time", "Strike", "CE_IV", "PE_IV", "IV_Spread", "Spot"]
+        columns=["Date", "Time", "Strike", "CE_IV", "PE_IV", "IV_Spread", "Spot"]
     )
     st.cache_data.clear()
 
@@ -354,7 +381,7 @@ elif df_oc is not None and not df_oc.empty:
             gamma_flip_strike = int((s1 + s2) / 2.0)
             break
 
-    # Target Strike Metrics
+    # Extract Target Strike Metrics
     target_row = df_oc[df_oc["Strike"] == selected_target_strike]
     if not target_row.empty:
         target_ce_iv = target_row["CE_IV"].values[0]
@@ -365,53 +392,60 @@ elif df_oc is not None and not df_oc.empty:
     else:
         target_ce_iv, target_pe_iv, target_iv_spread, target_ce_ltp, target_pe_ltp = 0.0, 0.0, 0.0, 0.0, 0.0
 
-    # Record Time-Series Tick
-    now_time = datetime.datetime.now().strftime("%H:%M:%S")
+    # ---------------------------------------------------------
+    # SMART TIME-SERIES ACCUMULATION LOGIC
+    # ---------------------------------------------------------
     hist_df = st.session_state["iv_spread_history"]
-    if hist_df.empty or hist_df.iloc[-1]["Time"] != now_time:
-        new_row = pd.DataFrame(
-            [
-                {
-                    "Time": now_time,
-                    "Strike": selected_target_strike,
-                    "CE_IV": target_ce_iv,
-                    "PE_IV": target_pe_iv,
-                    "IV_Spread": target_iv_spread,
-                    "Spot": spot_price,
-                }
-            ]
-        )
-        st.session_state["iv_spread_history"] = pd.concat(
-            [hist_df, new_row], ignore_index=True
-        )
 
-    # ---------------------------------------------------------
-    # MARKET DIRECTION ENGINE (DELTA OI & DEX)
-    # ---------------------------------------------------------
+    # Reset history if a new market session opens today
+    if is_market_live and not hist_df.empty:
+        last_rec_date = hist_df.iloc[-1].get("Date", "")
+        if last_rec_date != today_date_str:
+            st.session_state["iv_spread_history"] = pd.DataFrame(
+                columns=["Date", "Time", "Strike", "CE_IV", "PE_IV", "IV_Spread", "Spot"]
+            )
+            hist_df = st.session_state["iv_spread_history"]
+
+    # Append new tick if market is currently live OR if history is completely empty
+    if is_market_live or hist_df.empty:
+        if hist_df.empty or hist_df.iloc[-1]["Time"] != now_time_str:
+            new_row = pd.DataFrame(
+                [
+                    {
+                        "Date": today_date_str,
+                        "Time": now_time_str,
+                        "Strike": selected_target_strike,
+                        "CE_IV": target_ce_iv,
+                        "PE_IV": target_pe_iv,
+                        "IV_Spread": target_iv_spread,
+                        "Spot": spot_price,
+                    }
+                ]
+            )
+            st.session_state["iv_spread_history"] = pd.concat(
+                [hist_df, new_row], ignore_index=True
+            )
+
+    # Market Direction Logic
     total_net_delta_oi = df_oc["Net_Delta_OI"].sum()
     total_net_dex_lakhs = df_oc["Net_DEX"].sum()
     total_net_dex_crores = total_net_dex_lakhs / 100.0
 
     if total_net_delta_oi > 50000:
-        dir_signal = "STRONGLY BULLISH"
-        dir_color = "sub-green"
-        dir_desc = "Heavy Call Delta & Put Writing domination. Market Makers/Dealers are net short delta, forcing them to buy Nifty futures on upward moves."
+        dir_signal, dir_color = "STRONGLY BULLISH", "sub-green"
+        dir_desc = "Heavy Call Delta & Put Writing domination. Market Makers are net short delta, forcing them to buy Nifty futures on upward moves."
     elif total_net_delta_oi > 10000:
-        dir_signal = "MILDLY BULLISH"
-        dir_color = "sub-green"
+        dir_signal, dir_color = "MILDLY BULLISH", "sub-green"
         dir_desc = "Moderate positive delta skew. Market shows upward bias with decent support."
     elif total_net_delta_oi < -50000:
-        dir_signal = "STRONGLY BEARISH"
-        dir_color = "sub-red"
-        dir_desc = "Heavy Put Delta & Call Writing domination. Market Makers/Dealers are forced to sell Nifty futures on downward moves."
+        dir_signal, dir_color = "STRONGLY BEARISH", "sub-red"
+        dir_desc = "Heavy Put Delta & Call Writing domination. Market Makers are forced to sell Nifty futures on downward moves."
     elif total_net_delta_oi < -10000:
-        dir_signal = "MILDLY BEARISH"
-        dir_color = "sub-red"
+        dir_signal, dir_color = "MILDLY BEARISH", "sub-red"
         dir_desc = "Moderate negative delta skew. Downward pressure favored."
     else:
-        dir_signal = "NEUTRAL / RANGEBOUND"
-        dir_color = "sub-amber"
-        dir_desc = "Net Delta exposure is balanced near zero. Expect consolidation or rangebound trading between Call Wall and Put Wall."
+        dir_signal, dir_color = "NEUTRAL / RANGEBOUND", "sub-amber"
+        dir_desc = "Net Delta exposure is balanced near zero. Expect consolidation or rangebound trading."
 
     total_net_gex = df_oc["Net_GEX"].sum()
     is_pos_gamma = spot_price >= gamma_flip_strike or total_net_gex > 0
@@ -514,7 +548,6 @@ elif df_oc is not None and not df_oc.empty:
 
     # TAB 1: Market Direction Summary Box + Charts
     with tab1:
-        # Market Direction Summary Banner
         st.markdown(
             f"""
             <div class="summary-box">
@@ -594,8 +627,16 @@ elif df_oc is not None and not df_oc.empty:
     # TAB 2: Intraday Single-Strike IV Spread Live Timeseries Graph
     with tab2:
         st.subheader(
-            f"📈 Live Intraday IV Spread Tracker for {selected_target_strike} Strike"
+            f"📈 Intraday IV Spread Tracker for {selected_target_strike} Strike"
         )
+
+        status_html = (
+            '<span class="status-live">🟢 LIVE MARKET SESSION (09:15 - 15:30 IST)</span>'
+            if is_market_live
+            else '<span class="status-closed">🟠 MARKET CLOSED (Showing Last Session Recorded Data)</span>'
+        )
+        st.markdown(status_html, unsafe_allow_html=True)
+        st.markdown("<br>", unsafe_allow_html=True)
 
         col_iv1, col_iv2, col_iv3, col_iv4 = st.columns(4)
         col_iv1.metric(
@@ -618,7 +659,9 @@ elif df_oc is not None and not df_oc.empty:
             history_df["Strike"] == selected_target_strike
         ].copy()
 
-        if not target_history.empty and len(target_history) > 1:
+        if not target_history.empty:
+            recorded_date = target_history.iloc[-1].get("Date", today_date_str)
+
             fig_ts = go.Figure()
             fig_ts.add_trace(
                 go.Scatter(
@@ -636,14 +679,14 @@ elif df_oc is not None and not df_oc.empty:
                 template="plotly_dark",
                 paper_bgcolor="rgba(0,0,0,0)",
                 plot_bgcolor="rgba(0,0,0,0)",
-                title=f"Intraday IV Spread Movement ({selected_target_strike} Strike)",
-                xaxis_title="Time (Market Hours)",
+                title=f"Intraday IV Spread Movement ({selected_target_strike} Strike) - Session Date: {recorded_date}",
+                xaxis_title="Market Time (HH:MM:SS IST)",
                 yaxis_title="IV Spread Points (%)",
             )
             st.plotly_chart(fig_ts, use_container_width=True)
         else:
             st.info(
-                "⏳ **Accumulating Intraday Ticks:** The live timeseries chart will plot automatically as auto-refresh fetches market data over the trading session."
+                "⏳ **Accumulating Session Ticks:** The live timeseries chart will plot automatically as auto-refresh fetches market data over the trading session."
             )
 
         st.markdown("---")
