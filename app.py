@@ -22,7 +22,6 @@ st.markdown(
     .stApp { background-color: #0b0e14; color: #e0e6ed; }
     section[data-testid="stSidebar"] { background-color: #121721 !important; border-right: 1px solid #1e2638; }
     
-    /* Glassmorphism Metric Cards */
     .metric-card {
         background: #161c28;
         border: 1px solid #232d42;
@@ -40,7 +39,21 @@ st.markdown(
     .sub-amber { color: #FFD700; }
     .sub-blue { color: #29B6F6; }
 
-    /* Regime Badges */
+    /* Summary Banner Styling */
+    .summary-box {
+        background: #121824;
+        border: 1px solid #232d42;
+        border-radius: 8px;
+        padding: 16px 20px;
+        margin-bottom: 20px;
+    }
+    .summary-title {
+        font-size: 1.1rem;
+        font-weight: 700;
+        color: #ffffff;
+        margin-bottom: 8px;
+    }
+
     .regime-badge-pos {
         background-color: rgba(0, 230, 118, 0.15);
         border: 1px solid #00E676;
@@ -92,11 +105,11 @@ if not CLIENT_ID or not ACCESS_TOKEN:
     )
     st.stop()
 
-NIFTY_LOT_SIZE = 25  # Standard Nifty contract lot size
+NIFTY_LOT_SIZE = 25
 
 
 # ---------------------------------------------------------
-# 2. BLACK-SCHOLES GREEK ENGINE (GAMMA, VANNA, CHARM)
+# 2. BLACK-SCHOLES GREEK ENGINE
 # ---------------------------------------------------------
 def calculate_bs_greeks(S, K, T, sigma, r=0.07):
     if T <= 1e-5 or sigma <= 1e-4 or S <= 0 or K <= 0:
@@ -119,7 +132,7 @@ def calculate_bs_greeks(S, K, T, sigma, r=0.07):
 
 
 # ---------------------------------------------------------
-# 3. DIRECT REST API DATA ENGINE WITH ALL EXPOSURES
+# 3. DIRECT REST API DATA ENGINE
 # ---------------------------------------------------------
 @st.cache_data(ttl=3)
 def fetch_gex_option_chain(expiry_date):
@@ -160,7 +173,7 @@ def fetch_gex_option_chain(expiry_date):
 
             records = []
             for strike_str, details in oc_raw.items():
-                strike = int(float(strike_str))  # Force full integer strike
+                strike = int(float(strike_str))
                 ce = details.get("ce", {})
                 pe = details.get("pe", {})
 
@@ -176,7 +189,6 @@ def fetch_gex_option_chain(expiry_date):
                 ce_gamma = float(ce.get("greeks", {}).get("gamma", 0))
                 pe_gamma = float(pe.get("greeks", {}).get("gamma", 0))
 
-                # Compute Black-Scholes higher-order Greeks
                 if ce_gamma <= 0 and ce_iv > 0:
                     ce_gamma, ce_vanna, ce_charm = calculate_bs_greeks(
                         spot_price, strike, T_years, ce_iv
@@ -214,15 +226,15 @@ def fetch_gex_option_chain(expiry_date):
                 )
                 net_gex = call_gex + put_gex
 
-                # Delta-Weighted OI & Delta Exposure (DEX)
+                # Delta-Weighted OI & Cash DEX
                 ce_delta_oi = ce_oi * ce_delta
                 pe_delta_oi = pe_oi * pe_delta
                 net_delta_oi = ce_delta_oi + pe_delta_oi
                 net_dex = (
-                    (ce_oi * ce_delta) + (pe_oi * pe_delta)
-                ) * spot_price * NIFTY_LOT_SIZE / 1e5
+                    net_delta_oi * spot_price * NIFTY_LOT_SIZE / 1e5
+                )  # in ₹ Lakhs
 
-                # Vanna Exposure (VEX) & Charm Exposure (CHEX)
+                # VEX & CHEX
                 net_vex = (
                     (ce_oi * ce_vanna) - (pe_oi * pe_vanna)
                 ) * NIFTY_LOT_SIZE / 1e3
@@ -272,7 +284,7 @@ def fetch_gex_option_chain(expiry_date):
 
 
 # ---------------------------------------------------------
-# 4. CONTROLS & AUTO-REFRESH
+# 4. CONTROLS & SESSION STATE MEMORY
 # ---------------------------------------------------------
 st.sidebar.header("⚙️ Controls & Feeds")
 
@@ -288,10 +300,8 @@ selected_expiry = st.sidebar.date_input(
     "Expiry Date", default_expiry
 ).strftime("%Y-%m-%d")
 
-# Fetch GEX Data first to populate the single-strike dropdown
 df_oc, spot_price, error_remark = fetch_gex_option_chain(selected_expiry)
 
-# Target Strike Selector for Single-Strike Intraday IV Spread Tool
 selected_target_strike = None
 if df_oc is not None and not df_oc.empty:
     atm_strike_val = int(round(spot_price / 50) * 50)
@@ -301,12 +311,20 @@ if df_oc is not None and not df_oc.empty:
         all_strikes.index(atm_strike_val) if atm_strike_val in all_strikes else 0
     )
     selected_target_strike = st.sidebar.selectbox(
-        "🎯 Select Strike for Intraday IV Spread",
+        "🎯 Target Strike (Intraday IV Spread)",
         all_strikes,
         index=default_index,
     )
 
-if st.sidebar.button("🔄 Manual Refresh"):
+if "iv_spread_history" not in st.session_state:
+    st.session_state["iv_spread_history"] = pd.DataFrame(
+        columns=["Time", "Strike", "CE_IV", "PE_IV", "IV_Spread", "Spot"]
+    )
+
+if st.sidebar.button("🗑️ Clear Intraday History"):
+    st.session_state["iv_spread_history"] = pd.DataFrame(
+        columns=["Time", "Strike", "CE_IV", "PE_IV", "IV_Spread", "Spot"]
+    )
     st.cache_data.clear()
 
 
@@ -318,11 +336,9 @@ if error_remark:
 elif df_oc is not None and not df_oc.empty:
     atm_strike = int(round(spot_price / 50) * 50)
 
-    # 1. Key Levels Identification
     call_wall_strike = int(df_oc.loc[df_oc["Call_GEX"].idxmax()]["Strike"])
     put_wall_strike = int(df_oc.loc[df_oc["Put_GEX"].idxmin()]["Strike"])
 
-    # 2. Gamma Flip Calculation
     df_sorted = df_oc.sort_values("Strike").copy()
     gamma_flip_strike = int(spot_price)
     for i in range(1, len(df_sorted)):
@@ -338,7 +354,7 @@ elif df_oc is not None and not df_oc.empty:
             gamma_flip_strike = int((s1 + s2) / 2.0)
             break
 
-    # 3. Single-Strike IV Spread Calculation (Intraday Focus)
+    # Target Strike Metrics
     target_row = df_oc[df_oc["Strike"] == selected_target_strike]
     if not target_row.empty:
         target_ce_iv = target_row["CE_IV"].values[0]
@@ -349,7 +365,54 @@ elif df_oc is not None and not df_oc.empty:
     else:
         target_ce_iv, target_pe_iv, target_iv_spread, target_ce_ltp, target_pe_ltp = 0.0, 0.0, 0.0, 0.0, 0.0
 
+    # Record Time-Series Tick
+    now_time = datetime.datetime.now().strftime("%H:%M:%S")
+    hist_df = st.session_state["iv_spread_history"]
+    if hist_df.empty or hist_df.iloc[-1]["Time"] != now_time:
+        new_row = pd.DataFrame(
+            [
+                {
+                    "Time": now_time,
+                    "Strike": selected_target_strike,
+                    "CE_IV": target_ce_iv,
+                    "PE_IV": target_pe_iv,
+                    "IV_Spread": target_iv_spread,
+                    "Spot": spot_price,
+                }
+            ]
+        )
+        st.session_state["iv_spread_history"] = pd.concat(
+            [hist_df, new_row], ignore_index=True
+        )
+
+    # ---------------------------------------------------------
+    # MARKET DIRECTION ENGINE (DELTA OI & DEX)
+    # ---------------------------------------------------------
     total_net_delta_oi = df_oc["Net_Delta_OI"].sum()
+    total_net_dex_lakhs = df_oc["Net_DEX"].sum()
+    total_net_dex_crores = total_net_dex_lakhs / 100.0
+
+    if total_net_delta_oi > 50000:
+        dir_signal = "STRONGLY BULLISH"
+        dir_color = "sub-green"
+        dir_desc = "Heavy Call Delta & Put Writing domination. Market Makers/Dealers are net short delta, forcing them to buy Nifty futures on upward moves."
+    elif total_net_delta_oi > 10000:
+        dir_signal = "MILDLY BULLISH"
+        dir_color = "sub-green"
+        dir_desc = "Moderate positive delta skew. Market shows upward bias with decent support."
+    elif total_net_delta_oi < -50000:
+        dir_signal = "STRONGLY BEARISH"
+        dir_color = "sub-red"
+        dir_desc = "Heavy Put Delta & Call Writing domination. Market Makers/Dealers are forced to sell Nifty futures on downward moves."
+    elif total_net_delta_oi < -10000:
+        dir_signal = "MILDLY BEARISH"
+        dir_color = "sub-red"
+        dir_desc = "Moderate negative delta skew. Downward pressure favored."
+    else:
+        dir_signal = "NEUTRAL / RANGEBOUND"
+        dir_color = "sub-amber"
+        dir_desc = "Net Delta exposure is balanced near zero. Expect consolidation or rangebound trading between Call Wall and Put Wall."
+
     total_net_gex = df_oc["Net_GEX"].sum()
     is_pos_gamma = spot_price >= gamma_flip_strike or total_net_gex > 0
     regime_text = (
@@ -358,7 +421,7 @@ elif df_oc is not None and not df_oc.empty:
         else "NEGATIVE GAMMA (AMPLIFICATION / HIGH VOL)"
     )
 
-    # TOP METRICS BANNER
+    # TOP METRICS CARDS
     c1, c2, c3, c4, c5 = st.columns(5)
 
     with c1:
@@ -387,13 +450,12 @@ elif df_oc is not None and not df_oc.empty:
         )
 
     with c3:
-        delta_oi_class = "sub-green" if total_net_delta_oi >= 0 else "sub-red"
         st.markdown(
             f"""
             <div class="metric-card">
-                <div class="metric-title">NET DELTA-WEIGHTED OI</div>
-                <div class="metric-value">{total_net_delta_oi:+,.0f}</div>
-                <div class="metric-sub {delta_oi_class}">{"BULLISH BIAS" if total_net_delta_oi >= 0 else "BEARISH BIAS"}</div>
+                <div class="metric-title">MARKET DIRECTION BIAS</div>
+                <div class="metric-value">{dir_signal.split()[0]}</div>
+                <div class="metric-sub {dir_color}">{dir_signal}</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -403,9 +465,9 @@ elif df_oc is not None and not df_oc.empty:
         st.markdown(
             f"""
             <div class="metric-card">
-                <div class="metric-title">GAMMA FLIP LEVEL</div>
-                <div class="metric-value">₹{gamma_flip_strike:,}</div>
-                <div class="metric-sub sub-blue">CW: {call_wall_strike} | PW: {put_wall_strike}</div>
+                <div class="metric-title">NET DEX (RUPEE CASH)</div>
+                <div class="metric-value">₹{total_net_dex_crores:+.2f} Cr</div>
+                <div class="metric-sub sub-blue">Contracts: {total_net_delta_oi:+,.0f}</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -418,7 +480,7 @@ elif df_oc is not None and not df_oc.empty:
             <div class="metric-card">
                 <div class="metric-title">TOTAL NET GEX</div>
                 <div class="metric-value">₹{total_net_gex:,.1f}L</div>
-                <div class="metric-sub {net_gex_class}">Across Chain</div>
+                <div class="metric-sub {net_gex_class}">Flip: ₹{gamma_flip_strike:,}</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -430,13 +492,11 @@ elif df_oc is not None and not df_oc.empty:
         unsafe_allow_html=True,
     )
 
-    # Filter Strikes Near ATM (+/- 500 Points)
     df_filtered = df_oc[
         (df_oc["Strike"] >= atm_strike - 500)
         & (df_oc["Strike"] <= atm_strike + 500)
     ].copy()
 
-    # Force full integer formatting for strikes (24300) without SI conversion (24.3k)
     df_filtered["Strike_Label"] = df_filtered["Strike"].astype(str)
 
     # ---------------------------------------------------------
@@ -444,20 +504,47 @@ elif df_oc is not None and not df_oc.empty:
     # ---------------------------------------------------------
     tab1, tab2, tab3, tab4, tab5 = st.tabs(
         [
-            "🎯 Net Delta OI & DEX",
-            "⚡ Intraday Single-Strike IV Spread",
+            "🎯 Net Delta OI & DEX (Direction Summary)",
+            "⚡ Intraday Single-Strike IV Spread (Live Chart)",
             "📊 Net GEX Profile",
             "🌀 Higher-Order Exposures (VEX & CHEX)",
             "📋 Options Data Grid",
         ]
     )
 
-    # TAB 1: Net Delta-Weighted OI & DEX
+    # TAB 1: Market Direction Summary Box + Charts
     with tab1:
+        # Market Direction Summary Banner
+        st.markdown(
+            f"""
+            <div class="summary-box">
+                <div class="summary-title">🧭 Market Direction Summary (DEX & Delta-Weighted OI)</div>
+                <table style="width:100%; border-collapse: collapse; font-size: 0.95rem;">
+                    <tr style="border-bottom: 1px solid #232d42;">
+                        <td style="padding: 6px; color:#8b9bb4;"><b>Directional Signal:</b></td>
+                        <td style="padding: 6px;"><b class="{dir_color}">{dir_signal}</b></td>
+                        <td style="padding: 6px; color:#8b9bb4;"><b>Net Delta OI (Contracts):</b></td>
+                        <td style="padding: 6px; color:#ffffff;"><b>{total_net_delta_oi:+,.0f} Contracts</b></td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 6px; color:#8b9bb4;"><b>Net DEX (Rupee Value):</b></td>
+                        <td style="padding: 6px; color:#ffffff;"><b>₹{total_net_dex_crores:+.2f} Crores (₹{total_net_dex_lakhs:+,.1f} Lakhs)</b></td>
+                        <td style="padding: 6px; color:#8b9bb4;"><b>Primary Driver:</b></td>
+                        <td style="padding: 6px; color:#ffffff;">{"Call Dominance / Put Squeeze" if total_net_delta_oi >= 0 else "Put Dominance / Call Squeeze"}</td>
+                    </tr>
+                </table>
+                <div style="margin-top: 10px; font-size: 0.85rem; color: #b0bec5; background: #161c28; padding: 10px; border-radius: 6px;">
+                    💡 <b>Institutional Context:</b> {dir_desc}
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
         d_col1, d_col2 = st.columns(2)
 
         with d_col1:
-            st.subheader("Net Delta-Weighted Open Interest")
+            st.subheader("Net Delta-Weighted Open Interest (Contract Quantity)")
             fig_delta_oi = go.Figure()
             colors_delta = [
                 "#26A69A" if val >= 0 else "#EF5350"
@@ -481,7 +568,7 @@ elif df_oc is not None and not df_oc.empty:
             st.plotly_chart(fig_delta_oi, use_container_width=True)
 
         with d_col2:
-            st.subheader("Delta Exposure (DEX)")
+            st.subheader("Delta Exposure - DEX (Rupee Value in Lakhs)")
             fig_dex = go.Figure()
             colors_dex = [
                 "#26A69A" if val >= 0 else "#EF5350"
@@ -504,15 +591,15 @@ elif df_oc is not None and not df_oc.empty:
             )
             st.plotly_chart(fig_dex, use_container_width=True)
 
-    # TAB 2: Intraday Single-Strike IV Spread Focus Module
+    # TAB 2: Intraday Single-Strike IV Spread Live Timeseries Graph
     with tab2:
         st.subheader(
-            f"Intraday Focus: {selected_target_strike} Strike IV Spread Monitor"
+            f"📈 Live Intraday IV Spread Tracker for {selected_target_strike} Strike"
         )
 
         col_iv1, col_iv2, col_iv3, col_iv4 = st.columns(4)
         col_iv1.metric(
-            f"Selected Strike",
+            "Selected Strike",
             f"{selected_target_strike}",
             "ATM" if selected_target_strike == atm_strike else "OTM/ITM",
         )
@@ -521,13 +608,46 @@ elif df_oc is not None and not df_oc.empty:
         col_iv4.metric(
             "IV Spread (CE - PE)",
             f"{target_iv_spread:+.2f}%",
-            "Call Demand Premium"
-            if target_iv_spread >= 0
-            else "Put Demand Premium",
+            "Call Premium" if target_iv_spread >= 0 else "Put Premium",
         )
 
         st.markdown("---")
-        st.subheader("Full Chain IV Spread Skew (CE IV - PE IV)")
+
+        history_df = st.session_state["iv_spread_history"]
+        target_history = history_df[
+            history_df["Strike"] == selected_target_strike
+        ].copy()
+
+        if not target_history.empty and len(target_history) > 1:
+            fig_ts = go.Figure()
+            fig_ts.add_trace(
+                go.Scatter(
+                    x=target_history["Time"],
+                    y=target_history["IV_Spread"],
+                    mode="lines+markers",
+                    name="IV Spread (CE - PE)",
+                    line=dict(color="#FFA726", width=2),
+                )
+            )
+            fig_ts.add_hline(
+                y=0, line_dash="dash", line_color="white", opacity=0.4
+            )
+            fig_ts.update_layout(
+                template="plotly_dark",
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                title=f"Intraday IV Spread Movement ({selected_target_strike} Strike)",
+                xaxis_title="Time (Market Hours)",
+                yaxis_title="IV Spread Points (%)",
+            )
+            st.plotly_chart(fig_ts, use_container_width=True)
+        else:
+            st.info(
+                "⏳ **Accumulating Intraday Ticks:** The live timeseries chart will plot automatically as auto-refresh fetches market data over the trading session."
+            )
+
+        st.markdown("---")
+        st.subheader("Full Chain IV Spread Skew Across All Strikes")
 
         fig_iv_skew = go.Figure()
         fig_iv_skew.add_trace(
@@ -554,7 +674,6 @@ elif df_oc is not None and not df_oc.empty:
                 line=dict(color="#FFA726", width=2, dash="dot"),
             )
         )
-
         fig_iv_skew.add_hline(
             y=0, line_dash="dash", line_color="white", opacity=0.4
         )
@@ -592,7 +711,7 @@ elif df_oc is not None and not df_oc.empty:
         )
         st.plotly_chart(fig_gex, use_container_width=True)
 
-    # TAB 4: Higher-Order Exposures (Restored VEX & CHEX)
+    # TAB 4: Higher-Order Exposures (VEX & CHEX)
     with tab4:
         st.subheader("Higher-Order Greek Exposures (Vanna & Charm)")
         v_col1, v_col2 = st.columns(2)
@@ -616,7 +735,7 @@ elif df_oc is not None and not df_oc.empty:
             st.plotly_chart(fig_vex, use_container_width=True)
 
         with v_col2:
-            st.markdown("**Charm Exposure (CHEX - Time Decay)**")
+            st.markdown("**Charm Exposure (CHEX - Time Decay Flow)**")
             fig_chex = px.line(
                 df_filtered,
                 x="Strike_Label",
@@ -633,7 +752,7 @@ elif df_oc is not None and not df_oc.empty:
             )
             st.plotly_chart(fig_chex, use_container_width=True)
 
-    # TAB 5: Clean Data Grid
+    # TAB 5: Options Data Grid
     with tab5:
         st.subheader("Institutional Options Chain Data Grid")
         grid_df = df_filtered[
