@@ -87,7 +87,7 @@ st.markdown(
         position: absolute;
         z-index: 99999;
         bottom: 130%; 
-        right: -10px; /* Align to the right side of the icon */
+        right: -10px;
         opacity: 0;
         transition: opacity 0.2s;
         border: 1px solid #3B4252;
@@ -98,7 +98,6 @@ st.markdown(
         text-transform: none;
         letter-spacing: normal;
     }
-    /* Arrow for tooltip */
     .info-tooltip .tooltip-text::after {
         content: "";
         position: absolute;
@@ -270,7 +269,6 @@ def fetch_expiry_list_direct():
 def fetch_multi_expiry_vol_structure(spot_price):
     expiries = fetch_expiry_list_direct()
     
-    # Target up to 4 Expiries for faster loading
     if not expiries:
         today = datetime.date.today()
         expiries = []
@@ -370,6 +368,7 @@ if df_oc is not None and not df_oc.empty:
 REQUIRED_HIST_COLS = ["Date", "Time", "Strike", "CE_IV", "PE_IV", "IV_Spread", "Spot"]
 REQUIRED_PCR_COLS = ["Date", "Timestamp_dt", "Time", "PCR", "Delta_PCR_5m", "Delta_PCR_15m"]
 REQUIRED_GEX_COLS = ["Date", "Timestamp_dt", "Time", "Total_Net_GEX", "Z_GEX"]
+REQUIRED_SYNTH_COLS = ["Date", "Time", "Spot", "Strike_M50", "Strike_ATM", "Strike_P50", "Synth_M50", "Synth_ATM", "Synth_P50"]
 
 if "iv_spread_history" not in st.session_state or not set(REQUIRED_HIST_COLS).issubset(st.session_state["iv_spread_history"].columns):
     st.session_state["iv_spread_history"] = pd.DataFrame(columns=REQUIRED_HIST_COLS)
@@ -377,17 +376,20 @@ if "pcr_history" not in st.session_state or not set(REQUIRED_PCR_COLS).issubset(
     st.session_state["pcr_history"] = pd.DataFrame(columns=REQUIRED_PCR_COLS)
 if "gex_history" not in st.session_state or not set(REQUIRED_GEX_COLS).issubset(st.session_state["gex_history"].columns):
     st.session_state["gex_history"] = pd.DataFrame(columns=REQUIRED_GEX_COLS)
+if "synth_history" not in st.session_state or not set(REQUIRED_SYNTH_COLS).issubset(st.session_state["synth_history"].columns):
+    st.session_state["synth_history"] = pd.DataFrame(columns=REQUIRED_SYNTH_COLS)
 
 if st.sidebar.button("🗑️ Reset Session Cache"):
     st.session_state["iv_spread_history"] = pd.DataFrame(columns=REQUIRED_HIST_COLS)
     st.session_state["pcr_history"] = pd.DataFrame(columns=REQUIRED_PCR_COLS)
     st.session_state["gex_history"] = pd.DataFrame(columns=REQUIRED_GEX_COLS)
+    st.session_state["synth_history"] = pd.DataFrame(columns=REQUIRED_SYNTH_COLS)
     st.cache_data.clear()
     st.rerun()
 
 
 # ---------------------------------------------------------
-# 6. DATA PROCESSING & Z-SCORE ENGINE
+# 6. DATA PROCESSING & ENGINE LOGIC
 # ---------------------------------------------------------
 if error_remark:
     st.error(f"⚠️ **Dhan Server Error:** {error_remark}")
@@ -417,7 +419,6 @@ elif df_oc is not None and not df_oc.empty:
     target_pe_iv = target_row["PE_IV"].values[0] if not target_row.empty else 0.0
     target_iv_spread = target_ce_iv - target_pe_iv
 
-    # Filtered view for charts
     df_filtered = df_oc[(df_oc["Strike"] >= atm_strike - 550) & (df_oc["Strike"] <= atm_strike + 550)].copy()
     strike_labels = df_filtered["Strike"].astype(str).tolist()
 
@@ -477,7 +478,33 @@ elif df_oc is not None and not df_oc.empty:
     else:
         if not gex_df.empty: current_z_gex = gex_df.iloc[-1]["Z_GEX"]
 
-    # Z-GEX Interpretation
+    # 4. Multi-Strike Synthetic Parity Engine (ITM, ATM, OTM)
+    synth_df = st.session_state["synth_history"]
+    if is_market_live and not synth_df.empty and synth_df.iloc[-1]["Date"] != today_date_str:
+        synth_df = pd.DataFrame(columns=REQUIRED_SYNTH_COLS)
+
+    strike_m50 = atm_strike - 50
+    strike_p50 = atm_strike + 50
+
+    row_m50 = df_oc[df_oc["Strike"] == strike_m50]
+    row_atm = df_oc[df_oc["Strike"] == atm_strike]
+    row_p50 = df_oc[df_oc["Strike"] == strike_p50]
+
+    synth_m50 = strike_m50 + row_m50["CE_LTP"].values[0] - row_m50["PE_LTP"].values[0] if not row_m50.empty else spot_price
+    synth_atm = atm_strike + row_atm["CE_LTP"].values[0] - row_atm["PE_LTP"].values[0] if not row_atm.empty else spot_price
+    synth_p50 = strike_p50 + row_p50["CE_LTP"].values[0] - row_p50["PE_LTP"].values[0] if not row_p50.empty else spot_price
+
+    if is_market_live or synth_df.empty:
+        if synth_df.empty or synth_df.iloc[-1]["Time"] != now_time_str:
+            new_synth = pd.DataFrame([{
+                "Date": today_date_str, "Time": now_time_str, "Spot": spot_price,
+                "Strike_M50": strike_m50, "Strike_ATM": atm_strike, "Strike_P50": strike_p50,
+                "Synth_M50": synth_m50, "Synth_ATM": synth_atm, "Synth_P50": synth_p50
+            }])
+            st.session_state["synth_history"] = pd.concat([synth_df, new_synth], ignore_index=True)
+            synth_df = st.session_state["synth_history"]
+
+    # Regime Interpretation Logics
     if current_z_gex < -2.0:
         z_signal, z_color, z_card_border = "GAMMA COLLAPSE", "sub-red", "metric-card-red"
     elif -1.0 <= current_z_gex <= 1.0:
@@ -485,7 +512,6 @@ elif df_oc is not None and not df_oc.empty:
     else:
         z_signal, z_color, z_card_border = "TRANSITION ZONE", "sub-amber", "metric-card-amber"
 
-    # Direction Interpretation
     if total_net_delta_oi > 50000:
         dir_signal, dir_color = "STRONGLY BULLISH", "sub-green"
     elif total_net_delta_oi > 10000:
@@ -496,6 +522,19 @@ elif df_oc is not None and not df_oc.empty:
         dir_signal, dir_color = "MILDLY BEARISH", "sub-red"
     else:
         dir_signal, dir_color = "NEUTRAL / RANGEBOUND", "sub-amber"
+
+    # Synthetic Accumulation Flag Logic
+    # Threshold defined as Synthetic > Spot + 1.0 (indicating premium pricing/demand)
+    if (synth_m50 > spot_price + 1.0) and (synth_atm > spot_price + 1.0) and (synth_p50 > spot_price + 1.0):
+        synth_flag_text = "🟢 BULLISH ACCUMULATION FLAG: Synthetics Pricing at Premium (Spot Lags)"
+        synth_flag_color = "#00E676"
+    elif (synth_m50 < spot_price - 1.0) and (synth_atm < spot_price - 1.0) and (synth_p50 < spot_price - 1.0):
+        synth_flag_text = "🔴 BEARISH DISTRIBUTION FLAG: Synthetics Pricing at Discount (Spot Leads)"
+        synth_flag_color = "#FF5252"
+    else:
+        synth_flag_text = "⚪ NEUTRAL: Synthetic Parity Tracking Spot Closely"
+        synth_flag_color = "#8A93A6"
+
 
     # ---------------------------------------------------------
     # 7. DASHBOARD UI (PRINCE PAX COMMAND CENTER)
@@ -701,7 +740,23 @@ elif df_oc is not None and not df_oc.empty:
             st.info("Loading 4 expiries to build vol curve... (Takes ~5 seconds due to API limits)")
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # ================= ROW 6: INSTITUTIONAL PLAYBOOK EXPANDER =================
+    # ================= ROW 6: MULTI-STRIKE SYNTHETIC PARITY ENGINE =================
+    st.markdown('<div class="chart-container"><div class="info-tooltip">ⓘ<span class="tooltip-text"><b>Multi-Strike Synthetic Parity Engine.</b><br>Tracks the implied spot price derived from options premiums (K + C - P). If Synthetics break out while Spot consolidates, it signals institutional stealth accumulation.</span></div><div class="chart-title">Multi-Strike Synthetic Parity Engine (ITM, ATM, OTM)</div>', unsafe_allow_html=True)
+    st.markdown(f"**Live Regime Signal:** <span style='color: {synth_flag_color};'>{synth_flag_text}</span>", unsafe_allow_html=True)
+    
+    fig_synth = go.Figure()
+    if not synth_df.empty:
+        fig_synth.add_trace(go.Scatter(x=synth_df["Time"], y=synth_df["Spot"], mode="lines", name="Nifty Spot", line=dict(color="#FFD700", width=2)))
+        fig_synth.add_trace(go.Scatter(x=synth_df["Time"], y=synth_df["Synth_M50"], mode="lines", name=f"Synth ({strike_m50})", line=dict(color="#00E676", width=1.5, dash="dot")))
+        fig_synth.add_trace(go.Scatter(x=synth_df["Time"], y=synth_df["Synth_ATM"], mode="lines", name=f"Synth ATM ({atm_strike})", line=dict(color="#29B6F6", width=1.5, dash="dot")))
+        fig_synth.add_trace(go.Scatter(x=synth_df["Time"], y=synth_df["Synth_P50"], mode="lines", name=f"Synth ({strike_p50})", line=dict(color="#FF5252", width=1.5, dash="dot")))
+
+    fig_synth.update_xaxes(range=["09:15:00", "15:30:00"], dtick="3600000", gridcolor="#2A2E39")
+    fig_synth.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", margin=dict(l=0, r=0, t=10, b=0), height=300, legend=dict(orientation="h", y=1.1))
+    st.plotly_chart(fig_synth, use_container_width=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # ================= ROW 7: INSTITUTIONAL PLAYBOOK EXPANDER =================
     with st.expander("📖 Institutional Playbook: How to Trade Nifty Using Relative Option Demand", expanded=False):
         st.markdown("""
             Monitoring the **ATM IV Spread (IV_Call - IV_Put)** provides major advantages for intraday buyers:
@@ -763,7 +818,7 @@ elif df_oc is not None and not df_oc.empty:
             </div>
         """, unsafe_allow_html=True)
 
-    # ================= ROW 7: DATA GRID =================
+    # ================= ROW 8: DATA GRID =================
     st.markdown('<div class="chart-container"><div class="chart-title">Institutional Options Chain Grid</div>', unsafe_allow_html=True)
     grid_df = df_filtered[["Strike", "CE_LTP", "PE_LTP", "CE_OI", "PE_OI", "CE_Delta", "PE_Delta", "Net_Delta_OI", "Net_DEX", "Net_GEX", "Net_VEX", "Net_CHEX", "CE_IV", "PE_IV", "IV_Spread"]].copy()
     st.dataframe(
