@@ -304,7 +304,6 @@ def fetch_gex_option_chain(expiry_date):
 # ---------------------------------------------------------
 @st.cache_data(ttl=300)
 def fetch_expiry_list_direct():
-    """Fetches exact listed expiry dates for Nifty directly from Dhan API."""
     url = "https://api.dhan.co/v2/optionchain/expirylist"
     headers = {
         "client-id": CLIENT_ID,
@@ -326,28 +325,26 @@ def fetch_expiry_list_direct():
 
 @st.cache_data(ttl=120)
 def fetch_multi_expiry_vol_structure(spot_price):
-    """Fetches ATM IV across upcoming valid expiries to build Vol Term Structure & Forward Vol."""
     expiries = fetch_expiry_list_direct()
 
-    # Fallback to calculated Thursdays if expiry list endpoint is unavailable
     if not expiries:
         today = datetime.date.today()
         expiries = []
         for i in range(1, 45):
             d = today + datetime.timedelta(days=i)
-            if d.weekday() == 3:  # Thursday
+            if d.weekday() == 3:
                 expiries.append(d.strftime("%Y-%m-%d"))
             if len(expiries) >= 4:
                 break
     else:
-        expiries = expiries[:4]  # Take nearest 4 valid expiries to prevent rate limit limits
+        expiries = expiries[:4]
 
     atm_strike = int(round(spot_price / 50) * 50)
     vol_data = []
 
     for idx, exp in enumerate(expiries):
         if idx > 0:
-            time.sleep(1.1)  # Rate limit protection for Dhan API (1 req / 3s)
+            time.sleep(1.1)
 
         df_exp, _, err = fetch_gex_option_chain(exp)
         if df_exp is not None and not df_exp.empty:
@@ -379,7 +376,6 @@ def fetch_multi_expiry_vol_structure(spot_price):
     if df_vol.empty or len(df_vol) < 2:
         return pd.DataFrame()
 
-    # Calculate Forward Volatility
     fwd_vols = []
     for i in range(len(df_vol)):
         if i == 0:
@@ -405,7 +401,7 @@ def fetch_multi_expiry_vol_structure(spot_price):
 
 
 # ---------------------------------------------------------
-# 5. CONTROLS & SAFE SESSION MEMORY INITIALIZATION
+# 5. CONTROLS & SESSION MEMORY INITIALIZATION
 # ---------------------------------------------------------
 st.sidebar.header("⚙️ Controls & Feeds")
 
@@ -423,7 +419,6 @@ m_open = now_ist.replace(hour=9, minute=15, second=0, microsecond=0)
 m_close = now_ist.replace(hour=15, minute=30, second=0, microsecond=0)
 is_market_live = is_weekday and (m_open <= now_ist <= m_close)
 
-# Dynamic Expiry Date Selection
 valid_expiries = fetch_expiry_list_direct()
 if valid_expiries:
     selected_expiry = st.sidebar.selectbox("Primary Expiry Date", valid_expiries)
@@ -445,34 +440,24 @@ if df_oc is not None and not df_oc.empty:
         all_strikes.index(atm_strike_val) if atm_strike_val in all_strikes else 0
     )
     selected_target_strike = st.sidebar.selectbox(
-        "🎯 Target Strike (Intraday IV Spread)",
+        "🎯 Selected Strike (IV Spread)",
         all_strikes,
         index=default_index,
     )
 
-REQUIRED_HIST_COLS = [
-    "Date",
-    "Time",
-    "ATM_Strike",
-    "Target_Strike",
-    "ATM_CE_IV",
-    "ATM_PE_IV",
-    "ATM_IV_Spread",
-    "Target_IV_Spread",
-    "Spot",
-]
+# Required Columns for Intraday IV Spread and PCR Velocity Memory
+REQUIRED_HIST_COLS = ["Date", "Time", "Strike", "CE_IV", "PE_IV", "IV_Spread", "Spot"]
+REQUIRED_PCR_COLS = ["Date", "Timestamp_dt", "Time", "PCR", "Delta_PCR_5m", "Delta_PCR_15m"]
 
-if "iv_spread_history" not in st.session_state or not set(
-    REQUIRED_HIST_COLS
-).issubset(st.session_state["iv_spread_history"].columns):
-    st.session_state["iv_spread_history"] = pd.DataFrame(
-        columns=REQUIRED_HIST_COLS
-    )
+if "iv_spread_history" not in st.session_state or not set(REQUIRED_HIST_COLS).issubset(st.session_state["iv_spread_history"].columns):
+    st.session_state["iv_spread_history"] = pd.DataFrame(columns=REQUIRED_HIST_COLS)
+
+if "pcr_history" not in st.session_state or not set(REQUIRED_PCR_COLS).issubset(st.session_state["pcr_history"].columns):
+    st.session_state["pcr_history"] = pd.DataFrame(columns=REQUIRED_PCR_COLS)
 
 if st.sidebar.button("🗑️ Clear Intraday History"):
-    st.session_state["iv_spread_history"] = pd.DataFrame(
-        columns=REQUIRED_HIST_COLS
-    )
+    st.session_state["iv_spread_history"] = pd.DataFrame(columns=REQUIRED_HIST_COLS)
+    st.session_state["pcr_history"] = pd.DataFrame(columns=REQUIRED_PCR_COLS)
     st.cache_data.clear()
     st.rerun()
 
@@ -503,16 +488,7 @@ elif df_oc is not None and not df_oc.empty:
             gamma_flip_strike = int((s1 + s2) / 2.0)
             break
 
-    # ATM Strike IV Details
-    atm_row = df_oc[df_oc["Strike"] == atm_strike]
-    if not atm_row.empty:
-        atm_ce_iv = atm_row["CE_IV"].values[0]
-        atm_pe_iv = atm_row["PE_IV"].values[0]
-        atm_iv_spread = atm_ce_iv - atm_pe_iv
-    else:
-        atm_ce_iv, atm_pe_iv, atm_iv_spread = 0.0, 0.0, 0.0
-
-    # Selected Target Strike Details
+    # Extract Target Strike Details
     target_row = df_oc[df_oc["Strike"] == selected_target_strike]
     if not target_row.empty:
         target_ce_iv = target_row["CE_IV"].values[0]
@@ -521,36 +497,99 @@ elif df_oc is not None and not df_oc.empty:
     else:
         target_ce_iv, target_pe_iv, target_iv_spread = 0.0, 0.0, 0.0
 
-    # Intraday Accumulation Logic
+    df_filtered = df_oc[
+        (df_oc["Strike"] >= atm_strike - 500)
+        & (df_oc["Strike"] <= atm_strike + 500)
+    ].copy()
+
+    df_filtered["Strike_Label"] = df_filtered["Strike"].astype(str)
+
+    # ---------------------------------------------------------
+    # MULTI-STRIKE IV SPREAD ACCUMULATION
+    # ---------------------------------------------------------
     hist_df = st.session_state["iv_spread_history"]
     if is_market_live and not hist_df.empty:
         last_rec_date = hist_df.iloc[-1].get("Date", "")
         if last_rec_date != today_date_str:
-            st.session_state["iv_spread_history"] = pd.DataFrame(
-                columns=REQUIRED_HIST_COLS
-            )
+            st.session_state["iv_spread_history"] = pd.DataFrame(columns=REQUIRED_HIST_COLS)
             hist_df = st.session_state["iv_spread_history"]
 
     if is_market_live or hist_df.empty:
         if hist_df.empty or hist_df.iloc[-1]["Time"] != now_time_str:
-            new_row = pd.DataFrame(
-                [
-                    {
-                        "Date": today_date_str,
-                        "Time": now_time_str,
-                        "ATM_Strike": atm_strike,
-                        "Target_Strike": selected_target_strike,
-                        "ATM_CE_IV": atm_ce_iv,
-                        "ATM_PE_IV": atm_pe_iv,
-                        "ATM_IV_Spread": atm_iv_spread,
-                        "Target_IV_Spread": target_iv_spread,
-                        "Spot": spot_price,
-                    }
-                ]
-            )
-            st.session_state["iv_spread_history"] = pd.concat(
-                [hist_df, new_row], ignore_index=True
-            )
+            new_ticks = []
+            for _, r in df_filtered.iterrows():
+                new_ticks.append({
+                    "Date": today_date_str,
+                    "Time": now_time_str,
+                    "Strike": int(r["Strike"]),
+                    "CE_IV": float(r["CE_IV"]),
+                    "PE_IV": float(r["PE_IV"]),
+                    "IV_Spread": float(r["IV_Spread"]),
+                    "Spot": spot_price
+                })
+            st.session_state["iv_spread_history"] = pd.concat([hist_df, pd.DataFrame(new_ticks)], ignore_index=True)
+
+    # ---------------------------------------------------------
+    # INTRADAY PCR VELOCITY ($\Delta\text{PCR}$) ENGINE
+    # ---------------------------------------------------------
+    total_call_oi = df_oc["CE_OI"].sum()
+    total_put_oi = df_oc["PE_OI"].sum()
+    current_pcr = total_put_oi / total_call_oi if total_call_oi > 0 else 0.0
+
+    pcr_df = st.session_state["pcr_history"]
+    if is_market_live and not pcr_df.empty:
+        if pcr_df.iloc[-1].get("Date", "") != today_date_str:
+            st.session_state["pcr_history"] = pd.DataFrame(columns=REQUIRED_PCR_COLS)
+            pcr_df = st.session_state["pcr_history"]
+
+    delta_pcr_5m = 0.0
+    delta_pcr_15m = 0.0
+
+    if is_market_live or pcr_df.empty:
+        if pcr_df.empty or pcr_df.iloc[-1]["Time"] != now_time_str:
+            # Calculate 5m and 15m lookback changes
+            if not pcr_df.empty:
+                # Find closest tick 5m ago (300 sec)
+                past_5m_ticks = pcr_df[pcr_df["Timestamp_dt"] <= (now_ist - datetime.timedelta(minutes=5))]
+                if not past_5m_ticks.empty:
+                    delta_pcr_5m = current_pcr - past_5m_ticks.iloc[-1]["PCR"]
+
+                # Find closest tick 15m ago (900 sec)
+                past_15m_ticks = pcr_df[pcr_df["Timestamp_dt"] <= (now_ist - datetime.timedelta(minutes=15))]
+                if not past_15m_ticks.empty:
+                    delta_pcr_15m = current_pcr - past_15m_ticks.iloc[-1]["PCR"]
+
+            new_pcr_tick = pd.DataFrame([{
+                "Date": today_date_str,
+                "Timestamp_dt": now_ist,
+                "Time": now_time_str,
+                "PCR": current_pcr,
+                "Delta_PCR_5m": delta_pcr_5m,
+                "Delta_PCR_15m": delta_pcr_15m
+            }])
+            st.session_state["pcr_history"] = pd.concat([pcr_df, new_pcr_tick], ignore_index=True)
+            pcr_df = st.session_state["pcr_history"]
+    else:
+        if not pcr_df.empty:
+            delta_pcr_5m = pcr_df.iloc[-1].get("Delta_PCR_5m", 0.0)
+            delta_pcr_15m = pcr_df.iloc[-1].get("Delta_PCR_15m", 0.0)
+
+    # Interpret $\Delta\text{PCR}_{15\text{m}}$ Trading Signal
+    if delta_pcr_15m >= 0.15:
+        pcr_signal = "RAPID EXPANSION (+0.15+)"
+        pcr_signal_color = "sub-green"
+        pcr_interpretation = "Aggressive Put writing (Bullish support building)"
+        pcr_trade_action = "BUY CALLS"
+    elif delta_pcr_15m <= -0.15:
+        pcr_signal = "RAPID CONTRACTION (-0.15-)"
+        pcr_signal_color = "sub-red"
+        pcr_interpretation = "Aggressive Call writing / Put unwinding (Bearish pressure)"
+        pcr_trade_action = "BUY PUTS"
+    else:
+        pcr_signal = "FLAT / STABLE VELOCITY"
+        pcr_signal_color = "sub-amber"
+        pcr_interpretation = "Pure Theta decay regime (No directional velocity)"
+        pcr_trade_action = "NO TRADE / THETA"
 
     # Market Direction Logic
     total_net_delta_oi = df_oc["Net_Delta_OI"].sum()
@@ -597,13 +636,13 @@ elif df_oc is not None and not df_oc.empty:
         )
 
     with c2:
-        atm_spread_class = "sub-green" if atm_iv_spread >= 0 else "sub-red"
+        spread_class = "sub-green" if target_iv_spread >= 0 else "sub-red"
         st.markdown(
             f"""
             <div class="metric-card">
-                <div class="metric-title">ATM ({atm_strike}) IV SPREAD</div>
-                <div class="metric-value">{atm_iv_spread:+.2f}%</div>
-                <div class="metric-sub {atm_spread_class}">CE: {atm_ce_iv:.1f}% | PE: {atm_pe_iv:.1f}%</div>
+                <div class="metric-title">{selected_target_strike} IV SPREAD</div>
+                <div class="metric-value">{target_iv_spread:+.2f}%</div>
+                <div class="metric-sub {spread_class}">CE: {target_ce_iv:.1f}% | PE: {target_pe_iv:.1f}%</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -613,9 +652,9 @@ elif df_oc is not None and not df_oc.empty:
         st.markdown(
             f"""
             <div class="metric-card">
-                <div class="metric-title">MARKET DIRECTION BIAS</div>
-                <div class="metric-value">{dir_signal.split()[0]}</div>
-                <div class="metric-sub {dir_color}">{dir_signal}</div>
+                <div class="metric-title">ΔPCR (15M VELOCITY)</div>
+                <div class="metric-value">{delta_pcr_15m:+.2f}</div>
+                <div class="metric-sub {pcr_signal_color}">{pcr_trade_action}</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -625,9 +664,9 @@ elif df_oc is not None and not df_oc.empty:
         st.markdown(
             f"""
             <div class="metric-card">
-                <div class="metric-title">NET DEX (RUPEE CASH)</div>
-                <div class="metric-value">₹{total_net_dex_crores:+.2f} Cr</div>
-                <div class="metric-sub sub-blue">Contracts: {total_net_delta_oi:+,.0f}</div>
+                <div class="metric-title">MARKET DIRECTION BIAS</div>
+                <div class="metric-value">{dir_signal.split()[0]}</div>
+                <div class="metric-sub {dir_color}">{dir_signal}</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -652,22 +691,16 @@ elif df_oc is not None and not df_oc.empty:
         unsafe_allow_html=True,
     )
 
-    df_filtered = df_oc[
-        (df_oc["Strike"] >= atm_strike - 500)
-        & (df_oc["Strike"] <= atm_strike + 500)
-    ].copy()
-
-    df_filtered["Strike_Label"] = df_filtered["Strike"].astype(str)
-
     # ---------------------------------------------------------
     # TABBED ANALYTICS DASHBOARD
     # ---------------------------------------------------------
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
         [
             "🎯 Net Delta OI & DEX",
-            "⚡ Intraday ATM IV Spread",
+            "⚡ Intraday Strike IV Spread",
+            "📊 ΔPCR Rate of Change Velocity",
             "📈 Term Structure & Forward Vol",
-            "📊 Net GEX Profile",
+            "🛡️ Net GEX Profile",
             "🌀 Higher-Order Exposures",
             "📋 Data Grid",
         ]
@@ -748,82 +781,180 @@ elif df_oc is not None and not df_oc.empty:
             )
             st.plotly_chart(fig_dex, use_container_width=True)
 
-    # TAB 2: Intraday ATM IV Spread Engine
+    # TAB 2: Fixed 09:15 AM - 03:30 PM Intraday IV Spread Engine
     with tab2:
         st.subheader(
-            f"📈 Live Intraday ATM ({atm_strike}) & Target ({selected_target_strike}) IV Spread Tracker"
+            f"📈 Intraday IV Spread Tracker ({selected_target_strike} Strike)"
         )
 
         status_html = (
-            '<span class="status-live">🟢 LIVE MARKET SESSION (09:15 - 15:30 IST)</span>'
+            '<span class="status-live">🟢 LIVE MARKET SESSION (09:15 AM - 03:30 PM IST)</span>'
             if is_market_live
-            else '<span class="status-closed">🟠 MARKET CLOSED (Showing Recorded Session Data)</span>'
+            else '<span class="status-closed">🟠 MARKET CLOSED (Showing Recorded Session Curve)</span>'
         )
         st.markdown(status_html, unsafe_allow_html=True)
         st.markdown("<br>", unsafe_allow_html=True)
 
         col_iv1, col_iv2, col_iv3, col_iv4 = st.columns(4)
-        col_iv1.metric("ATM Strike", f"{atm_strike}")
-        col_iv2.metric("ATM Call IV", f"{atm_ce_iv:.2f}%")
-        col_iv3.metric("ATM Put IV", f"{atm_pe_iv:.2f}%")
+        col_iv1.metric("Selected Strike", f"{selected_target_strike}", "ATM" if selected_target_strike == atm_strike else "OTM/ITM")
+        col_iv2.metric("Call IV", f"{target_ce_iv:.2f}%")
+        col_iv3.metric("Put IV", f"{target_pe_iv:.2f}%")
         col_iv4.metric(
-            "ATM IV Spread (CE - PE)",
-            f"{atm_iv_spread:+.2f}%",
-            "Call Premium" if atm_iv_spread >= 0 else "Put Premium",
+            "IV Spread (CE - PE)",
+            f"{target_iv_spread:+.2f}%",
+            "Call Premium" if target_iv_spread >= 0 else "Put Premium",
         )
 
         st.markdown("---")
 
         history_df = st.session_state["iv_spread_history"]
+        strike_history = history_df[history_df["Strike"] == selected_target_strike].copy()
 
-        if not history_df.empty:
-            recorded_date = history_df.iloc[-1].get("Date", today_date_str)
+        fig_ts = go.Figure()
 
-            fig_ts = go.Figure()
-
-            # ATM IV Spread Line
+        if not strike_history.empty:
             fig_ts.add_trace(
                 go.Scatter(
-                    x=history_df["Time"],
-                    y=history_df["ATM_IV_Spread"],
+                    x=strike_history["Time"],
+                    y=strike_history["IV_Spread"],
                     mode="lines+markers",
-                    name=f"ATM ({atm_strike}) IV Spread",
+                    name=f"{selected_target_strike} IV Spread",
                     line=dict(color="#29B6F6", width=2.5),
+                    marker=dict(size=4),
                 )
             )
 
-            # Target Strike IV Spread Line (if different from ATM)
-            if selected_target_strike != atm_strike:
-                fig_ts.add_trace(
+        fig_ts.add_hline(y=0, line_dash="dash", line_color="white", opacity=0.4)
+
+        fig_ts.update_xaxes(
+            range=["09:15:00", "15:30:00"],
+            tickvals=[
+                "09:15:00",
+                "10:00:00",
+                "11:00:00",
+                "12:00:00",
+                "13:00:00",
+                "14:00:00",
+                "15:00:00",
+                "15:30:00",
+            ],
+            ticktext=[
+                "09:15 AM",
+                "10:00 AM",
+                "11:00 AM",
+                "12:00 PM",
+                "01:00 PM",
+                "02:00 PM",
+                "03:00 PM",
+                "03:30 PM",
+            ],
+            title="Market Session Time (09:15 AM - 03:30 PM IST)",
+            gridcolor="#1e2638",
+        )
+
+        fig_ts.update_layout(
+            template="plotly_dark",
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            title=f"Intraday Volatility Spread ({selected_target_strike} Strike) | 09:15 AM - 03:30 PM IST",
+            yaxis_title="IV Spread Points (%)",
+            legend=dict(orientation="h", y=1.1),
+        )
+
+        st.plotly_chart(fig_ts, use_container_width=True)
+
+    # TAB 3: Intraday PCR Rate of Change Velocity ($\Delta\text{PCR}$)
+    with tab3:
+        st.subheader("⚡ Intraday PCR Rate of Change Velocity ($\Delta\text{PCR}$)")
+
+        st.markdown(
+            f"""
+            <div class="summary-box">
+                <div class="summary-title">📊 Live Intraday PCR Velocity Matrix</div>
+                <table style="width:100%; border-collapse: collapse; font-size: 0.95rem;">
+                    <tr style="border-bottom: 1px solid #232d42;">
+                        <td style="padding: 6px; color:#8b9bb4;"><b>Current Overall PCR:</b></td>
+                        <td style="padding: 6px; color:#ffffff;"><b>{current_pcr:.2f}</b></td>
+                        <td style="padding: 6px; color:#8b9bb4;"><b>ΔPCR (15m Velocity):</b></td>
+                        <td style="padding: 6px;"><b class="{pcr_signal_color}">{delta_pcr_15m:+.2f}</b></td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 6px; color:#8b9bb4;"><b>Institutional Action:</b></td>
+                        <td style="padding: 6px; color:#ffffff;"><b>{pcr_interpretation}</b></td>
+                        <td style="padding: 6px; color:#8b9bb4;"><b>Trade Execution Signal:</b></td>
+                        <td style="padding: 6px;"><b class="{pcr_signal_color}">{pcr_trade_action}</b></td>
+                    </tr>
+                </table>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        pcr_history_df = st.session_state["pcr_history"]
+
+        if not pcr_history_df.empty:
+            p1, p2 = st.columns(2)
+
+            with p1:
+                st.markdown("#### INTRADAY OVERALL PCR CURVE")
+                fig_pcr_curve = go.Figure()
+                fig_pcr_curve.add_trace(
                     go.Scatter(
-                        x=history_df["Time"],
-                        y=history_df["Target_IV_Spread"],
-                        mode="lines+markers",
-                        name=f"Target ({selected_target_strike}) IV Spread",
-                        line=dict(color="#FFA726", width=2, dash="dot"),
+                        x=pcr_history_df["Time"],
+                        y=pcr_history_df["PCR"],
+                        mode="lines",
+                        name="PCR",
+                        line=dict(color="#29B6F6", width=2.5),
                     )
                 )
+                fig_pcr_curve.add_hline(y=1.0, line_dash="dash", line_color="yellow", annotation_text="Neutral 1.0")
+                fig_pcr_curve.update_xaxes(
+                    range=["09:15:00", "15:30:00"],
+                    title="Time (IST)",
+                    gridcolor="#1e2638",
+                )
+                fig_pcr_curve.update_layout(
+                    template="plotly_dark",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    yaxis_title="Put-Call Ratio (PCR)",
+                )
+                st.plotly_chart(fig_pcr_curve, use_container_width=True)
 
-            fig_ts.add_hline(
-                y=0, line_dash="dash", line_color="white", opacity=0.4
-            )
-            fig_ts.update_layout(
-                template="plotly_dark",
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(0,0,0,0)",
-                title=f"Intraday Volatility Spread Curve (Session: {recorded_date})",
-                xaxis_title="Market Time (IST)",
-                yaxis_title="IV Spread Points (%)",
-                legend=dict(orientation="h", y=1.1),
-            )
-            st.plotly_chart(fig_ts, use_container_width=True)
-        else:
-            st.info(
-                "⏳ **Accumulating Session Ticks:** The live intraday graph updates automatically over the market session."
-            )
+            with p2:
+                st.markdown("#### 15-MIN PCR VELOCITY ($\Delta\text{PCR}_{15\text{m}}$)")
+                fig_pcr_vel = go.Figure()
 
-    # TAB 3: Term Structure & Forward Vol
-    with tab3:
+                vel_colors = [
+                    "#00E676" if v >= 0.05 else ("#FF5252" if v <= -0.05 else "#8b9bb4")
+                    for v in pcr_history_df["Delta_PCR_15m"]
+                ]
+
+                fig_pcr_vel.add_trace(
+                    go.Bar(
+                        x=pcr_history_df["Time"],
+                        y=pcr_history_df["Delta_PCR_15m"],
+                        marker_color=vel_colors,
+                        name="ΔPCR 15m",
+                    )
+                )
+                fig_pcr_vel.add_hline(y=0.15, line_dash="dash", line_color="#00E676", annotation_text="+0.15 Bull Trigger")
+                fig_pcr_vel.add_hline(y=-0.15, line_dash="dash", line_color="#FF5252", annotation_text="-0.15 Bear Trigger")
+                fig_pcr_vel.update_xaxes(
+                    range=["09:15:00", "15:30:00"],
+                    title="Time (IST)",
+                    gridcolor="#1e2638",
+                )
+                fig_pcr_vel.update_layout(
+                    template="plotly_dark",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    yaxis_title="ΔPCR Velocity",
+                )
+                st.plotly_chart(fig_pcr_vel, use_container_width=True)
+
+    # TAB 4: Term Structure & Forward Vol
+    with tab4:
         st.subheader("Forward Volatility Term Structure & Vol Curve")
 
         df_vol_struct = fetch_multi_expiry_vol_structure(spot_price)
@@ -875,12 +1006,10 @@ elif df_oc is not None and not df_oc.empty:
                 )
                 st.plotly_chart(fig_vol_curve, use_container_width=True)
         else:
-            st.warning(
-                "⚠️ **Term Structure Data Building:** Additional expiries are loading or market feeds are paused outside trading hours."
-            )
+            st.warning("⚠️ Term structure building: Loading additional expiries.")
 
-    # TAB 4: Net GEX
-    with tab4:
+    # TAB 5: Net GEX
+    with tab5:
         st.subheader("Net Gamma Exposure (GEX) Profile")
         fig_gex = go.Figure()
         colors_gex = [
@@ -902,8 +1031,8 @@ elif df_oc is not None and not df_oc.empty:
         )
         st.plotly_chart(fig_gex, use_container_width=True)
 
-    # TAB 5: Higher-Order Exposures
-    with tab5:
+    # TAB 6: Higher-Order Exposures
+    with tab6:
         st.subheader("Higher-Order Greek Exposures (Vanna & Charm)")
         v_col1, v_col2 = st.columns(2)
 
@@ -943,8 +1072,8 @@ elif df_oc is not None and not df_oc.empty:
             )
             st.plotly_chart(fig_chex, use_container_width=True)
 
-    # TAB 6: Data Grid
-    with tab6:
+    # TAB 7: Data Grid
+    with tab7:
         st.subheader("Institutional Options Chain Data Grid")
         grid_df = df_filtered[
             [
