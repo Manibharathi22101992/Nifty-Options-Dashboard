@@ -54,6 +54,25 @@ st.markdown(
         margin-bottom: 8px;
     }
 
+    .playbook-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.9rem;
+        margin-top: 10px;
+    }
+    .playbook-table th {
+        background-color: #1e2638;
+        color: #8b9bb4;
+        text-align: left;
+        padding: 10px;
+        border: 1px solid #232d42;
+    }
+    .playbook-table td {
+        padding: 10px;
+        border: 1px solid #232d42;
+        color: #e0e6ed;
+    }
+
     .status-live {
         background-color: rgba(0, 230, 118, 0.15);
         border: 1px solid #00E676;
@@ -445,7 +464,6 @@ if df_oc is not None and not df_oc.empty:
         index=default_index,
     )
 
-# Required Columns for Intraday IV Spread and PCR Velocity Memory
 REQUIRED_HIST_COLS = ["Date", "Time", "Strike", "CE_IV", "PE_IV", "IV_Spread", "Spot"]
 REQUIRED_PCR_COLS = ["Date", "Timestamp_dt", "Time", "PCR", "Delta_PCR_5m", "Delta_PCR_15m"]
 
@@ -547,14 +565,11 @@ elif df_oc is not None and not df_oc.empty:
 
     if is_market_live or pcr_df.empty:
         if pcr_df.empty or pcr_df.iloc[-1]["Time"] != now_time_str:
-            # Calculate 5m and 15m lookback changes
             if not pcr_df.empty:
-                # Find closest tick 5m ago (300 sec)
                 past_5m_ticks = pcr_df[pcr_df["Timestamp_dt"] <= (now_ist - datetime.timedelta(minutes=5))]
                 if not past_5m_ticks.empty:
                     delta_pcr_5m = current_pcr - past_5m_ticks.iloc[-1]["PCR"]
 
-                # Find closest tick 15m ago (900 sec)
                 past_15m_ticks = pcr_df[pcr_df["Timestamp_dt"] <= (now_ist - datetime.timedelta(minutes=15))]
                 if not past_15m_ticks.empty:
                     delta_pcr_15m = current_pcr - past_15m_ticks.iloc[-1]["PCR"]
@@ -574,22 +589,12 @@ elif df_oc is not None and not df_oc.empty:
             delta_pcr_5m = pcr_df.iloc[-1].get("Delta_PCR_5m", 0.0)
             delta_pcr_15m = pcr_df.iloc[-1].get("Delta_PCR_15m", 0.0)
 
-    # Interpret $\Delta\text{PCR}_{15\text{m}}$ Trading Signal
     if delta_pcr_15m >= 0.15:
-        pcr_signal = "RAPID EXPANSION (+0.15+)"
-        pcr_signal_color = "sub-green"
-        pcr_interpretation = "Aggressive Put writing (Bullish support building)"
-        pcr_trade_action = "BUY CALLS"
+        pcr_signal, pcr_signal_color, pcr_interpretation, pcr_trade_action = "RAPID EXPANSION (+0.15+)", "sub-green", "Aggressive Put writing (Bullish support building)", "BUY CALLS"
     elif delta_pcr_15m <= -0.15:
-        pcr_signal = "RAPID CONTRACTION (-0.15-)"
-        pcr_signal_color = "sub-red"
-        pcr_interpretation = "Aggressive Call writing / Put unwinding (Bearish pressure)"
-        pcr_trade_action = "BUY PUTS"
+        pcr_signal, pcr_signal_color, pcr_interpretation, pcr_trade_action = "RAPID CONTRACTION (-0.15-)", "sub-red", "Aggressive Call writing / Put unwinding (Bearish pressure)", "BUY PUTS"
     else:
-        pcr_signal = "FLAT / STABLE VELOCITY"
-        pcr_signal_color = "sub-amber"
-        pcr_interpretation = "Pure Theta decay regime (No directional velocity)"
-        pcr_trade_action = "NO TRADE / THETA"
+        pcr_signal, pcr_signal_color, pcr_interpretation, pcr_trade_action = "FLAT / STABLE VELOCITY", "sub-amber", "Pure Theta decay regime (No directional velocity)", "NO TRADE / THETA"
 
     # Market Direction Logic
     total_net_delta_oi = df_oc["Net_Delta_OI"].sum()
@@ -597,28 +602,19 @@ elif df_oc is not None and not df_oc.empty:
     total_net_dex_crores = total_net_dex_lakhs / 100.0
 
     if total_net_delta_oi > 50000:
-        dir_signal, dir_color = "STRONGLY BULLISH", "sub-green"
-        dir_desc = "Heavy Call Delta & Put Writing domination. Market Makers are net short delta, forcing them to buy Nifty futures on upward moves."
+        dir_signal, dir_color, dir_desc = "STRONGLY BULLISH", "sub-green", "Heavy Call Delta & Put Writing domination."
     elif total_net_delta_oi > 10000:
-        dir_signal, dir_color = "MILDLY BULLISH", "sub-green"
-        dir_desc = "Moderate positive delta skew. Market shows upward bias with decent support."
+        dir_signal, dir_color, dir_desc = "MILDLY BULLISH", "sub-green", "Moderate positive delta skew. Upward bias."
     elif total_net_delta_oi < -50000:
-        dir_signal, dir_color = "STRONGLY BEARISH", "sub-red"
-        dir_desc = "Heavy Put Delta & Call Writing domination. Market Makers are forced to sell Nifty futures on downward moves."
+        dir_signal, dir_color, dir_desc = "STRONGLY BEARISH", "sub-red", "Heavy Put Delta & Call Writing domination."
     elif total_net_delta_oi < -10000:
-        dir_signal, dir_color = "MILDLY BEARISH", "sub-red"
-        dir_desc = "Moderate negative delta skew. Downward pressure favored."
+        dir_signal, dir_color, dir_desc = "MILDLY BEARISH", "sub-red", "Moderate negative delta skew. Downward pressure."
     else:
-        dir_signal, dir_color = "NEUTRAL / RANGEBOUND", "sub-amber"
-        dir_desc = "Net Delta exposure is balanced near zero. Expect consolidation or rangebound trading."
+        dir_signal, dir_color, dir_desc = "NEUTRAL / RANGEBOUND", "sub-amber", "Net Delta exposure is balanced near zero."
 
     total_net_gex = df_oc["Net_GEX"].sum()
     is_pos_gamma = spot_price >= gamma_flip_strike or total_net_gex > 0
-    regime_text = (
-        "POSITIVE GAMMA (PINNING / LOW VOL)"
-        if is_pos_gamma
-        else "NEGATIVE GAMMA (AMPLIFICATION / HIGH VOL)"
-    )
+    regime_text = "POSITIVE GAMMA (PINNING / LOW VOL)" if is_pos_gamma else "NEGATIVE GAMMA (AMPLIFICATION / HIGH VOL)"
 
     # TOP METRICS CARDS
     c1, c2, c3, c4, c5 = st.columns(5)
@@ -631,8 +627,7 @@ elif df_oc is not None and not df_oc.empty:
                 <div class="metric-value">₹{spot_price:,.2f}</div>
                 <div class="metric-sub sub-amber">ATM: {atm_strike}</div>
             </div>
-            """,
-            unsafe_allow_html=True,
+            """, unsafe_allow_html=True
         )
 
     with c2:
@@ -644,8 +639,7 @@ elif df_oc is not None and not df_oc.empty:
                 <div class="metric-value">{target_iv_spread:+.2f}%</div>
                 <div class="metric-sub {spread_class}">CE: {target_ce_iv:.1f}% | PE: {target_pe_iv:.1f}%</div>
             </div>
-            """,
-            unsafe_allow_html=True,
+            """, unsafe_allow_html=True
         )
 
     with c3:
@@ -656,8 +650,7 @@ elif df_oc is not None and not df_oc.empty:
                 <div class="metric-value">{delta_pcr_15m:+.2f}</div>
                 <div class="metric-sub {pcr_signal_color}">{pcr_trade_action}</div>
             </div>
-            """,
-            unsafe_allow_html=True,
+            """, unsafe_allow_html=True
         )
 
     with c4:
@@ -668,8 +661,7 @@ elif df_oc is not None and not df_oc.empty:
                 <div class="metric-value">{dir_signal.split()[0]}</div>
                 <div class="metric-sub {dir_color}">{dir_signal}</div>
             </div>
-            """,
-            unsafe_allow_html=True,
+            """, unsafe_allow_html=True
         )
 
     with c5:
@@ -681,8 +673,7 @@ elif df_oc is not None and not df_oc.empty:
                 <div class="metric-value">₹{total_net_gex:,.1f}L</div>
                 <div class="metric-sub {net_gex_class}">Flip: ₹{gamma_flip_strike:,}</div>
             </div>
-            """,
-            unsafe_allow_html=True,
+            """, unsafe_allow_html=True
         )
 
     badge_style = "regime-badge-pos" if is_pos_gamma else "regime-badge-neg"
@@ -730,68 +721,33 @@ elif df_oc is not None and not df_oc.empty:
                     💡 <b>Institutional Context:</b> {dir_desc}
                 </div>
             </div>
-            """,
-            unsafe_allow_html=True,
+            """, unsafe_allow_html=True
         )
 
         d_col1, d_col2 = st.columns(2)
         with d_col1:
             st.subheader("Net Delta-Weighted Open Interest")
             fig_delta_oi = go.Figure()
-            colors_delta = [
-                "#26A69A" if val >= 0 else "#EF5350"
-                for val in df_filtered["Net_Delta_OI"]
-            ]
-            fig_delta_oi.add_trace(
-                go.Bar(
-                    x=df_filtered["Strike_Label"],
-                    y=df_filtered["Net_Delta_OI"],
-                    marker_color=colors_delta,
-                )
-            )
+            colors_delta = ["#26A69A" if val >= 0 else "#EF5350" for val in df_filtered["Net_Delta_OI"]]
+            fig_delta_oi.add_trace(go.Bar(x=df_filtered["Strike_Label"], y=df_filtered["Net_Delta_OI"], marker_color=colors_delta))
             fig_delta_oi.update_xaxes(type="category", title="Strike Price")
-            fig_delta_oi.update_layout(
-                template="plotly_dark",
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(0,0,0,0)",
-                yaxis_title="Delta Contracts",
-            )
+            fig_delta_oi.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", yaxis_title="Delta Contracts")
             st.plotly_chart(fig_delta_oi, use_container_width=True)
 
         with d_col2:
             st.subheader("Delta Exposure - DEX (₹ Lakhs)")
             fig_dex = go.Figure()
-            colors_dex = [
-                "#26A69A" if val >= 0 else "#EF5350"
-                for val in df_filtered["Net_DEX"]
-            ]
-            fig_dex.add_trace(
-                go.Bar(
-                    x=df_filtered["Strike_Label"],
-                    y=df_filtered["Net_DEX"],
-                    marker_color=colors_dex,
-                )
-            )
+            colors_dex = ["#26A69A" if val >= 0 else "#EF5350" for val in df_filtered["Net_DEX"]]
+            fig_dex.add_trace(go.Bar(x=df_filtered["Strike_Label"], y=df_filtered["Net_DEX"], marker_color=colors_dex))
             fig_dex.update_xaxes(type="category", title="Strike Price")
-            fig_dex.update_layout(
-                template="plotly_dark",
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(0,0,0,0)",
-                yaxis_title="Net DEX (₹ Lakhs)",
-            )
+            fig_dex.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", yaxis_title="Net DEX (₹ Lakhs)")
             st.plotly_chart(fig_dex, use_container_width=True)
 
-    # TAB 2: Fixed 09:15 AM - 03:30 PM Intraday IV Spread Engine
+    # TAB 2: Fixed 09:15 AM - 03:30 PM Intraday IV Spread Engine + Trading Playbook
     with tab2:
-        st.subheader(
-            f"📈 Intraday IV Spread Tracker ({selected_target_strike} Strike)"
-        )
+        st.subheader(f"📈 Intraday IV Spread Tracker ({selected_target_strike} Strike)")
 
-        status_html = (
-            '<span class="status-live">🟢 LIVE MARKET SESSION (09:15 AM - 03:30 PM IST)</span>'
-            if is_market_live
-            else '<span class="status-closed">🟠 MARKET CLOSED (Showing Recorded Session Curve)</span>'
-        )
+        status_html = '<span class="status-live">🟢 LIVE MARKET SESSION (09:15 AM - 03:30 PM IST)</span>' if is_market_live else '<span class="status-closed">🟠 MARKET CLOSED (Showing Recorded Session Curve)</span>'
         st.markdown(status_html, unsafe_allow_html=True)
         st.markdown("<br>", unsafe_allow_html=True)
 
@@ -799,11 +755,7 @@ elif df_oc is not None and not df_oc.empty:
         col_iv1.metric("Selected Strike", f"{selected_target_strike}", "ATM" if selected_target_strike == atm_strike else "OTM/ITM")
         col_iv2.metric("Call IV", f"{target_ce_iv:.2f}%")
         col_iv3.metric("Put IV", f"{target_pe_iv:.2f}%")
-        col_iv4.metric(
-            "IV Spread (CE - PE)",
-            f"{target_iv_spread:+.2f}%",
-            "Call Premium" if target_iv_spread >= 0 else "Put Premium",
-        )
+        col_iv4.metric("IV Spread (CE - PE)", f"{target_iv_spread:+.2f}%", "Call Premium" if target_iv_spread >= 0 else "Put Premium")
 
         st.markdown("---")
 
@@ -813,55 +765,93 @@ elif df_oc is not None and not df_oc.empty:
         fig_ts = go.Figure()
 
         if not strike_history.empty:
-            fig_ts.add_trace(
-                go.Scatter(
-                    x=strike_history["Time"],
-                    y=strike_history["IV_Spread"],
-                    mode="lines+markers",
-                    name=f"{selected_target_strike} IV Spread",
-                    line=dict(color="#29B6F6", width=2.5),
-                    marker=dict(size=4),
-                )
-            )
+            fig_ts.add_trace(go.Scatter(x=strike_history["Time"], y=strike_history["IV_Spread"], mode="lines+markers", name=f"{selected_target_strike} IV Spread", line=dict(color="#29B6F6", width=2.5), marker=dict(size=4)))
 
         fig_ts.add_hline(y=0, line_dash="dash", line_color="white", opacity=0.4)
-
         fig_ts.update_xaxes(
             range=["09:15:00", "15:30:00"],
-            tickvals=[
-                "09:15:00",
-                "10:00:00",
-                "11:00:00",
-                "12:00:00",
-                "13:00:00",
-                "14:00:00",
-                "15:00:00",
-                "15:30:00",
-            ],
-            ticktext=[
-                "09:15 AM",
-                "10:00 AM",
-                "11:00 AM",
-                "12:00 PM",
-                "01:00 PM",
-                "02:00 PM",
-                "03:00 PM",
-                "03:30 PM",
-            ],
+            tickvals=["09:15:00", "10:00:00", "11:00:00", "12:00:00", "13:00:00", "14:00:00", "15:00:00", "15:30:00"],
+            ticktext=["09:15 AM", "10:00 AM", "11:00 AM", "12:00 PM", "01:00 PM", "02:00 PM", "03:00 PM", "03:30 PM"],
             title="Market Session Time (09:15 AM - 03:30 PM IST)",
             gridcolor="#1e2638",
         )
-
         fig_ts.update_layout(
-            template="plotly_dark",
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
-            title=f"Intraday Volatility Spread ({selected_target_strike} Strike) | 09:15 AM - 03:30 PM IST",
-            yaxis_title="IV Spread Points (%)",
-            legend=dict(orientation="h", y=1.1),
+            template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            title=f"Intraday Volatility Spread ({selected_target_strike} Strike)",
+            yaxis_title="IV Spread Points (%)", legend=dict(orientation="h", y=1.1)
         )
-
         st.plotly_chart(fig_ts, use_container_width=True)
+
+        # ---------------------------------------------------------
+        # NEW TOOL: TRADING PLAYBOOK FOR RELATIVE OPTION DEMAND
+        # ---------------------------------------------------------
+        st.markdown("---")
+        with st.expander("📖 Institutional Playbook: How to Trade Nifty Using Relative Option Demand", expanded=True):
+            st.markdown(
+                """
+                Monitoring the **ATM IV Spread (IV_Call - IV_Put)** provides three major advantages for intraday option buyers:
+
+                **1. Spotting Pre-Breakout Accumulation**
+                *   **The Context:** Spot Nifty is stuck in a narrow 15-point range.
+                *   **The Signal:** The ATM IV Spread trends upward steadily over a 15–30 minute period.
+                *   **The Interpretation:** Institutions are quietly accumulating Calls ahead of a move. Because spot hasn't broken out yet, you can buy ATM Calls at lower premiums before Delta and Vega expansion hit simultaneously.
+
+                **2. Identifying "Fakeout" Breakouts**
+                *   **The Context:** Nifty breaks above an intraday resistance level on the 5-minute chart.
+                *   **The Signal:** Call IV drops rapidly as spot pushes higher (IV Spread turns sharply negative).
+                *   **The Interpretation:** Market makers are dumping Call inventory into retail buyers pushing the breakout. The rise in spot is lacklustre and lacks institutional backing. Do not buy Calls; prepare for a mean-reversion move down.
+
+                **3. Trend Continuation Confirmation**
+                *   **The Context:** Nifty is trending upward making higher highs.
+                *   **The Signal:** Call IV continues to rise alongside Spot Nifty (defying normal inverse volatility behavior).
+                *   **The Interpretation:** Demand for Calls is outstripping time decay and spot movement. This indicates high-conviction institutional buying—a setup where option buyers can hold for larger multi-strike targets rather than quick scalps.
+                """
+            )
+
+            st.markdown(
+                """
+                <div class="summary-box" style="margin-top: 15px;">
+                    <div class="summary-title" style="color: #FFA726;">Interpreting Intraday Signals (Summary Matrix)</div>
+                    <table class="playbook-table">
+                        <thead>
+                            <tr>
+                                <th>Spot Nifty Action</th>
+                                <th>Relative Demand (IV Spread)</th>
+                                <th>What Is Happening Under the Hood</th>
+                                <th>Option Buyer Action</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td>Sideways Range</td>
+                                <td><span style="color:#00E676; font-weight:bold;">Surging Upward</span></td>
+                                <td>Stealth Call accumulation by funds</td>
+                                <td><span style="color:#00E676; font-weight:bold;">Buy ATM Calls</span> before the spot breakout</td>
+                            </tr>
+                            <tr>
+                                <td>Rallying High</td>
+                                <td><span style="color:#00E676; font-weight:bold;">Rising with Spot</span></td>
+                                <td>High-conviction buying sweeping asks</td>
+                                <td><span style="color:#00E676; font-weight:bold;">Hold Long Calls</span> (Ride the trend)</td>
+                            </tr>
+                            <tr>
+                                <td>Rallying High</td>
+                                <td><span style="color:#FF5252; font-weight:bold;">Falling Sharply</span></td>
+                                <td>Retail buying absorbed by MMs selling</td>
+                                <td><span style="color:#FF5252; font-weight:bold;">Avoid Calls</span> (High risk of sharp reversal)</td>
+                            </tr>
+                            <tr>
+                                <td>Sideways Range</td>
+                                <td><span style="color:#FF5252; font-weight:bold;">Plunging Downward</span></td>
+                                <td>Stealth Put accumulation / hedging</td>
+                                <td><span style="color:#FF5252; font-weight:bold;">Buy ATM Puts</span> before the spot breakdown</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
 
     # TAB 3: Intraday PCR Rate of Change Velocity ($\Delta\text{PCR}$)
     with tab3:
@@ -886,124 +876,52 @@ elif df_oc is not None and not df_oc.empty:
                     </tr>
                 </table>
             </div>
-            """,
-            unsafe_allow_html=True,
+            """, unsafe_allow_html=True
         )
 
         pcr_history_df = st.session_state["pcr_history"]
 
         if not pcr_history_df.empty:
             p1, p2 = st.columns(2)
-
             with p1:
                 st.markdown("#### INTRADAY OVERALL PCR CURVE")
                 fig_pcr_curve = go.Figure()
-                fig_pcr_curve.add_trace(
-                    go.Scatter(
-                        x=pcr_history_df["Time"],
-                        y=pcr_history_df["PCR"],
-                        mode="lines",
-                        name="PCR",
-                        line=dict(color="#29B6F6", width=2.5),
-                    )
-                )
-                fig_pcr_curve.add_hline(y=1.0, line_dash="dash", line_color="yellow", annotation_text="Neutral 1.0")
-                fig_pcr_curve.update_xaxes(
-                    range=["09:15:00", "15:30:00"],
-                    title="Time (IST)",
-                    gridcolor="#1e2638",
-                )
-                fig_pcr_curve.update_layout(
-                    template="plotly_dark",
-                    paper_bgcolor="rgba(0,0,0,0)",
-                    plot_bgcolor="rgba(0,0,0,0)",
-                    yaxis_title="Put-Call Ratio (PCR)",
-                )
+                fig_pcr_curve.add_trace(go.Scatter(x=pcr_history_df["Time"], y=pcr_history_df["PCR"], mode="lines", name="PCR", line=dict(color="#29B6F6", width=2.5)))
+                fig_pcr_curve.add_hline(y=1.0, line_dash="dash", line_color="yellow")
+                fig_pcr_curve.update_xaxes(range=["09:15:00", "15:30:00"], title="Time (IST)", gridcolor="#1e2638")
+                fig_pcr_curve.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", yaxis_title="Put-Call Ratio (PCR)")
                 st.plotly_chart(fig_pcr_curve, use_container_width=True)
 
             with p2:
                 st.markdown("#### 15-MIN PCR VELOCITY ($\Delta\text{PCR}_{15\text{m}}$)")
                 fig_pcr_vel = go.Figure()
-
-                vel_colors = [
-                    "#00E676" if v >= 0.05 else ("#FF5252" if v <= -0.05 else "#8b9bb4")
-                    for v in pcr_history_df["Delta_PCR_15m"]
-                ]
-
-                fig_pcr_vel.add_trace(
-                    go.Bar(
-                        x=pcr_history_df["Time"],
-                        y=pcr_history_df["Delta_PCR_15m"],
-                        marker_color=vel_colors,
-                        name="ΔPCR 15m",
-                    )
-                )
-                fig_pcr_vel.add_hline(y=0.15, line_dash="dash", line_color="#00E676", annotation_text="+0.15 Bull Trigger")
-                fig_pcr_vel.add_hline(y=-0.15, line_dash="dash", line_color="#FF5252", annotation_text="-0.15 Bear Trigger")
-                fig_pcr_vel.update_xaxes(
-                    range=["09:15:00", "15:30:00"],
-                    title="Time (IST)",
-                    gridcolor="#1e2638",
-                )
-                fig_pcr_vel.update_layout(
-                    template="plotly_dark",
-                    paper_bgcolor="rgba(0,0,0,0)",
-                    plot_bgcolor="rgba(0,0,0,0)",
-                    yaxis_title="ΔPCR Velocity",
-                )
+                vel_colors = ["#00E676" if v >= 0.05 else ("#FF5252" if v <= -0.05 else "#8b9bb4") for v in pcr_history_df["Delta_PCR_15m"]]
+                fig_pcr_vel.add_trace(go.Bar(x=pcr_history_df["Time"], y=pcr_history_df["Delta_PCR_15m"], marker_color=vel_colors, name="ΔPCR 15m"))
+                fig_pcr_vel.add_hline(y=0.15, line_dash="dash", line_color="#00E676", annotation_text="+0.15 Trigger")
+                fig_pcr_vel.add_hline(y=-0.15, line_dash="dash", line_color="#FF5252", annotation_text="-0.15 Trigger")
+                fig_pcr_vel.update_xaxes(range=["09:15:00", "15:30:00"], title="Time (IST)", gridcolor="#1e2638")
+                fig_pcr_vel.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", yaxis_title="ΔPCR Velocity")
                 st.plotly_chart(fig_pcr_vel, use_container_width=True)
 
     # TAB 4: Term Structure & Forward Vol
     with tab4:
         st.subheader("Forward Volatility Term Structure & Vol Curve")
-
         df_vol_struct = fetch_multi_expiry_vol_structure(spot_price)
 
         if not df_vol_struct.empty and len(df_vol_struct) >= 2:
             v_left, v_right = st.columns(2)
-
             with v_left:
                 st.markdown("#### FORWARD VOL TERM STRUCTURE")
                 fig_fwd = go.Figure()
-                fig_fwd.add_trace(
-                    go.Scatter(
-                        x=df_vol_struct["Expiry"],
-                        y=df_vol_struct["Forward_Vol"],
-                        mode="lines+markers",
-                        name="Forward Vol (%)",
-                        line=dict(color="#00E676", width=2.5),
-                        marker=dict(size=8, color="#00E676"),
-                    )
-                )
-                fig_fwd.update_layout(
-                    template="plotly_dark",
-                    paper_bgcolor="rgba(0,0,0,0)",
-                    plot_bgcolor="rgba(0,0,0,0)",
-                    xaxis_title="End Tenor Expiry",
-                    yaxis_title="Forward Vol (%)",
-                )
+                fig_fwd.add_trace(go.Scatter(x=df_vol_struct["Expiry"], y=df_vol_struct["Forward_Vol"], mode="lines+markers", name="Forward Vol (%)", line=dict(color="#00E676", width=2.5), marker=dict(size=8, color="#00E676")))
+                fig_fwd.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", xaxis_title="End Tenor Expiry", yaxis_title="Forward Vol (%)")
                 st.plotly_chart(fig_fwd, use_container_width=True)
 
             with v_right:
                 st.markdown("#### CUMULATIVE VOL CURVE")
                 fig_vol_curve = go.Figure()
-                fig_vol_curve.add_trace(
-                    go.Scatter(
-                        x=df_vol_struct["Expiry"],
-                        y=df_vol_struct["Mean_IV"],
-                        mode="lines+markers",
-                        name="Cumulative Vol (%)",
-                        line=dict(color="#AB47BC", width=2.5),
-                        marker=dict(size=8, color="#AB47BC"),
-                    )
-                )
-                fig_vol_curve.update_layout(
-                    template="plotly_dark",
-                    paper_bgcolor="rgba(0,0,0,0)",
-                    plot_bgcolor="rgba(0,0,0,0)",
-                    xaxis_title="Expiry Date",
-                    yaxis_title="Cumulative Vol (%)",
-                )
+                fig_vol_curve.add_trace(go.Scatter(x=df_vol_struct["Expiry"], y=df_vol_struct["Mean_IV"], mode="lines+markers", name="Cumulative Vol (%)", line=dict(color="#AB47BC", width=2.5), marker=dict(size=8, color="#AB47BC")))
+                fig_vol_curve.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", xaxis_title="Expiry Date", yaxis_title="Cumulative Vol (%)")
                 st.plotly_chart(fig_vol_curve, use_container_width=True)
         else:
             st.warning("⚠️ Term structure building: Loading additional expiries.")
@@ -1012,109 +930,41 @@ elif df_oc is not None and not df_oc.empty:
     with tab5:
         st.subheader("Net Gamma Exposure (GEX) Profile")
         fig_gex = go.Figure()
-        colors_gex = [
-            "#26A69A" if g >= 0 else "#EF5350" for g in df_filtered["Net_GEX"]
-        ]
-        fig_gex.add_trace(
-            go.Bar(
-                x=df_filtered["Strike_Label"],
-                y=df_filtered["Net_GEX"],
-                marker_color=colors_gex,
-            )
-        )
+        colors_gex = ["#26A69A" if g >= 0 else "#EF5350" for g in df_filtered["Net_GEX"]]
+        fig_gex.add_trace(go.Bar(x=df_filtered["Strike_Label"], y=df_filtered["Net_GEX"], marker_color=colors_gex))
         fig_gex.update_xaxes(type="category", title="Strike Price")
-        fig_gex.update_layout(
-            template="plotly_dark",
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
-            yaxis_title="Net GEX (₹ Lakhs / 1% Move)",
-        )
+        fig_gex.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", yaxis_title="Net GEX (₹ Lakhs / 1% Move)")
         st.plotly_chart(fig_gex, use_container_width=True)
 
     # TAB 6: Higher-Order Exposures
     with tab6:
         st.subheader("Higher-Order Greek Exposures (Vanna & Charm)")
         v_col1, v_col2 = st.columns(2)
-
         with v_col1:
             st.markdown("**Vanna Exposure (VEX - IV Sensitivity)**")
-            fig_vex = px.line(
-                df_filtered,
-                x="Strike_Label",
-                y="Net_VEX",
-                markers=True,
-                template="plotly_dark",
-            )
+            fig_vex = px.line(df_filtered, x="Strike_Label", y="Net_VEX", markers=True, template="plotly_dark")
             fig_vex.update_traces(line_color="#FFA726", line_width=2)
             fig_vex.update_xaxes(type="category", title="Strike Price")
-            fig_vex.update_layout(
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(0,0,0,0)",
-                yaxis_title="Net VEX",
-            )
+            fig_vex.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", yaxis_title="Net VEX")
             st.plotly_chart(fig_vex, use_container_width=True)
 
         with v_col2:
             st.markdown("**Charm Exposure (CHEX - Time Decay Flow)**")
-            fig_chex = px.line(
-                df_filtered,
-                x="Strike_Label",
-                y="Net_CHEX",
-                markers=True,
-                template="plotly_dark",
-            )
+            fig_chex = px.line(df_filtered, x="Strike_Label", y="Net_CHEX", markers=True, template="plotly_dark")
             fig_chex.update_traces(line_color="#AB47BC", line_width=2)
             fig_chex.update_xaxes(type="category", title="Strike Price")
-            fig_chex.update_layout(
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(0,0,0,0)",
-                yaxis_title="Net CHEX",
-            )
+            fig_chex.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", yaxis_title="Net CHEX")
             st.plotly_chart(fig_chex, use_container_width=True)
 
     # TAB 7: Data Grid
     with tab7:
         st.subheader("Institutional Options Chain Data Grid")
         grid_df = df_filtered[
-            [
-                "Strike",
-                "CE_LTP",
-                "PE_LTP",
-                "CE_OI",
-                "PE_OI",
-                "CE_Delta",
-                "PE_Delta",
-                "Net_Delta_OI",
-                "Net_DEX",
-                "Net_GEX",
-                "Net_VEX",
-                "Net_CHEX",
-                "CE_IV",
-                "PE_IV",
-                "IV_Spread",
-            ]
+            ["Strike", "CE_LTP", "PE_LTP", "CE_OI", "PE_OI", "CE_Delta", "PE_Delta", "Net_Delta_OI", "Net_DEX", "Net_GEX", "Net_VEX", "Net_CHEX", "CE_IV", "PE_IV", "IV_Spread"]
         ].copy()
 
         st.dataframe(
             grid_df.style.format(
-                {
-                    "Strike": "{:.0f}",
-                    "CE_LTP": "₹{:.2f}",
-                    "PE_LTP": "₹{:.2f}",
-                    "CE_OI": "{:,.0f}",
-                    "PE_OI": "{:,.0f}",
-                    "CE_Delta": "{:.2f}",
-                    "PE_Delta": "{:.2f}",
-                    "Net_Delta_OI": "{:+,.0f}",
-                    "Net_DEX": "{:+,.1f}L",
-                    "Net_GEX": "{:+,.1f}L",
-                    "Net_VEX": "{:+,.2f}",
-                    "Net_CHEX": "{:+,.2f}",
-                    "CE_IV": "{:.1f}%",
-                    "PE_IV": "{:.1f}%",
-                    "IV_Spread": "{:+.2f}%",
-                }
-            ),
-            use_container_width=True,
-            height=450,
+                {"Strike": "{:.0f}", "CE_LTP": "₹{:.2f}", "PE_LTP": "₹{:.2f}", "CE_OI": "{:,.0f}", "PE_OI": "{:,.0f}", "CE_Delta": "{:.2f}", "PE_Delta": "{:.2f}", "Net_Delta_OI": "{:+,.0f}", "Net_DEX": "{:+,.1f}L", "Net_GEX": "{:+,.1f}L", "Net_VEX": "{:+,.2f}", "Net_CHEX": "{:+,.2f}", "CE_IV": "{:.1f}%", "PE_IV": "{:.1f}%", "IV_Spread": "{:+.2f}%"}
+            ), use_container_width=True, height=450
         )
