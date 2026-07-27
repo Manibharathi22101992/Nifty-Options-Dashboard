@@ -12,7 +12,7 @@ from streamlit_autorefresh import st_autorefresh
 # 1. PAGE SETUP & TRADYTICS-STYLE TERMINAL CSS
 # ---------------------------------------------------------
 st.set_page_config(
-    page_title="Prince PAX Dashboard | Volatility Desk",
+    page_title="Prince PAX | Volatility Desk",
     layout="wide",
     initial_sidebar_state="collapsed", 
 )
@@ -230,7 +230,6 @@ def fetch_expiry_list_direct():
 def fetch_multi_expiry_vol_structure(spot_price):
     expiries = fetch_expiry_list_direct()
     
-    # Target up to 8 Expiries for deeper term structure
     if not expiries:
         today = datetime.date.today()
         expiries = []
@@ -601,8 +600,11 @@ elif df_oc is not None and not df_oc.empty:
         fig_gex.add_trace(go.Bar(x=df_filtered["Strike_Label"], y=df_filtered["Net_GEX"], marker_color=colors_gex))
         
         # Spot and Flip Markers
-        fig_gex.add_vline(x=closest_spot_strike, line_dash="solid", line_color="#FFD700", annotation_text="Spot")
-        fig_gex.add_vline(x=closest_flip_strike, line_dash="dash", line_color="#29B6F6", annotation_text="Flip")
+        fig_gex.add_vline(x=closest_spot_strike, line_dash="solid", line_color="#FFD700")
+        fig_gex.add_annotation(x=closest_spot_strike, y=0.95, yref="paper", text="Spot", showarrow=False, font=dict(color="#FFD700", size=10), xanchor="left")
+        
+        fig_gex.add_vline(x=closest_flip_strike, line_dash="dash", line_color="#29B6F6")
+        fig_gex.add_annotation(x=closest_flip_strike, y=0.85, yref="paper", text="Flip", showarrow=False, font=dict(color="#29B6F6", size=10), xanchor="left")
         
         fig_gex.update_xaxes(type="category", gridcolor="#2A2E39", tickangle=-45)
         fig_gex.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", margin=dict(l=0, r=0, t=10, b=0), height=240, showlegend=False)
