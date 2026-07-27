@@ -1,5 +1,6 @@
 import datetime
 import math
+import time
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -299,25 +300,55 @@ def fetch_gex_option_chain(expiry_date):
 
 
 # ---------------------------------------------------------
-# 4. MULTI-EXPIRY TERM STRUCTURE ENGINE
+# 4. DYNAMIC EXPIRY LIST & MULTI-EXPIRY TERM STRUCTURE
 # ---------------------------------------------------------
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=300)
+def fetch_expiry_list_direct():
+    """Fetches exact listed expiry dates for Nifty directly from Dhan API."""
+    url = "https://api.dhan.co/v2/optionchain/expirylist"
+    headers = {
+        "client-id": CLIENT_ID,
+        "access-token": ACCESS_TOKEN,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    payload = {"UnderlyingScrip": 13, "UnderlyingSeg": "IDX_I"}
+
+    try:
+        res = requests.post(url, headers=headers, json=payload, timeout=5)
+        data = res.json()
+        if res.status_code == 200 and data.get("status") == "success":
+            return data.get("data", [])
+    except Exception:
+        pass
+    return []
+
+
+@st.cache_data(ttl=120)
 def fetch_multi_expiry_vol_structure(spot_price):
-    """Fetches ATM IV across upcoming weekly/monthly expiries to build Vol Term Structure & Forward Vol."""
-    # Generate next 6 Thursday expiries
-    today = datetime.date.today()
-    expiries = []
-    for i in range(1, 12):
-        d = today + datetime.timedelta(days=i)
-        if d.weekday() == 3:  # Thursday
-            expiries.append(d.strftime("%Y-%m-%d"))
-        if len(expiries) >= 6:
-            break
+    """Fetches ATM IV across upcoming valid expiries to build Vol Term Structure & Forward Vol."""
+    expiries = fetch_expiry_list_direct()
+
+    # Fallback to calculated Thursdays if expiry list endpoint is unavailable
+    if not expiries:
+        today = datetime.date.today()
+        expiries = []
+        for i in range(1, 45):
+            d = today + datetime.timedelta(days=i)
+            if d.weekday() == 3:  # Thursday
+                expiries.append(d.strftime("%Y-%m-%d"))
+            if len(expiries) >= 4:
+                break
+    else:
+        expiries = expiries[:4]  # Take nearest 4 valid expiries to prevent rate limit limits
 
     atm_strike = int(round(spot_price / 50) * 50)
     vol_data = []
 
-    for exp in expiries:
+    for idx, exp in enumerate(expiries):
+        if idx > 0:
+            time.sleep(1.1)  # Rate limit protection for Dhan API (1 req / 3s)
+
         df_exp, _, err = fetch_gex_option_chain(exp)
         if df_exp is not None and not df_exp.empty:
             atm_row = df_exp[df_exp["Strike"] == atm_strike]
@@ -330,7 +361,7 @@ def fetch_multi_expiry_vol_structure(spot_price):
 
             mean_iv = (ce_iv + pe_iv) / 2.0
             exp_date_obj = datetime.datetime.strptime(exp, "%Y-%m-%d").date()
-            days_to_exp = max((exp_date_obj - today).days, 1)
+            days_to_exp = max((exp_date_obj - datetime.date.today()).days, 1)
 
             vol_data.append(
                 {
@@ -345,10 +376,10 @@ def fetch_multi_expiry_vol_structure(spot_price):
             )
 
     df_vol = pd.DataFrame(vol_data)
-    if df_vol.empty:
-        return df_vol
+    if df_vol.empty or len(df_vol) < 2:
+        return pd.DataFrame()
 
-    # Calculate Forward Volatility Curves
+    # Calculate Forward Volatility
     fwd_vols = []
     for i in range(len(df_vol)):
         if i == 0:
@@ -365,7 +396,7 @@ def fetch_multi_expiry_vol_structure(spot_price):
             if var_diff > 0 and dt > 0:
                 fwd_v = math.sqrt(var_diff / dt) * 100.0
             else:
-                fwd_v = v2 * 100.0  # Fallback cap
+                fwd_v = v2 * 100.0
 
             fwd_vols.append(fwd_v)
 
@@ -374,7 +405,7 @@ def fetch_multi_expiry_vol_structure(spot_price):
 
 
 # ---------------------------------------------------------
-# 5. CONTROLS & SESSION TIME-SERIES MEMORY
+# 5. CONTROLS & SAFE SESSION MEMORY INITIALIZATION
 # ---------------------------------------------------------
 st.sidebar.header("⚙️ Controls & Feeds")
 
@@ -392,12 +423,16 @@ m_open = now_ist.replace(hour=9, minute=15, second=0, microsecond=0)
 m_close = now_ist.replace(hour=15, minute=30, second=0, microsecond=0)
 is_market_live = is_weekday and (m_open <= now_ist <= m_close)
 
-days_until_thursday = (3 - now_ist.weekday()) % 7
-default_expiry = (now_ist + datetime.timedelta(days=days_until_thursday)).strftime("%Y-%m-%d")
-
-selected_expiry = st.sidebar.date_input(
-    "Primary Expiry Date", datetime.datetime.strptime(default_expiry, "%Y-%m-%d")
-).strftime("%Y-%m-%d")
+# Dynamic Expiry Date Selection
+valid_expiries = fetch_expiry_list_direct()
+if valid_expiries:
+    selected_expiry = st.sidebar.selectbox("Primary Expiry Date", valid_expiries)
+else:
+    days_until_thursday = (3 - now_ist.weekday()) % 7
+    default_expiry = (now_ist + datetime.timedelta(days=days_until_thursday)).strftime("%Y-%m-%d")
+    selected_expiry = st.sidebar.date_input(
+        "Primary Expiry Date", datetime.datetime.strptime(default_expiry, "%Y-%m-%d")
+    ).strftime("%Y-%m-%d")
 
 df_oc, spot_price, error_remark = fetch_gex_option_chain(selected_expiry)
 
@@ -415,36 +450,31 @@ if df_oc is not None and not df_oc.empty:
         index=default_index,
     )
 
-if "iv_spread_history" not in st.session_state:
+REQUIRED_HIST_COLS = [
+    "Date",
+    "Time",
+    "ATM_Strike",
+    "Target_Strike",
+    "ATM_CE_IV",
+    "ATM_PE_IV",
+    "ATM_IV_Spread",
+    "Target_IV_Spread",
+    "Spot",
+]
+
+if "iv_spread_history" not in st.session_state or not set(
+    REQUIRED_HIST_COLS
+).issubset(st.session_state["iv_spread_history"].columns):
     st.session_state["iv_spread_history"] = pd.DataFrame(
-        columns=[
-            "Date",
-            "Time",
-            "ATM_Strike",
-            "Target_Strike",
-            "ATM_CE_IV",
-            "ATM_PE_IV",
-            "ATM_IV_Spread",
-            "Target_IV_Spread",
-            "Spot",
-        ]
+        columns=REQUIRED_HIST_COLS
     )
 
 if st.sidebar.button("🗑️ Clear Intraday History"):
     st.session_state["iv_spread_history"] = pd.DataFrame(
-        columns=[
-            "Date",
-            "Time",
-            "ATM_Strike",
-            "Target_Strike",
-            "ATM_CE_IV",
-            "ATM_PE_IV",
-            "ATM_IV_Spread",
-            "Target_IV_Spread",
-            "Spot",
-        ]
+        columns=REQUIRED_HIST_COLS
     )
     st.cache_data.clear()
+    st.rerun()
 
 
 # ---------------------------------------------------------
@@ -473,7 +503,7 @@ elif df_oc is not None and not df_oc.empty:
             gamma_flip_strike = int((s1 + s2) / 2.0)
             break
 
-    # ATM Strike Specific IV Details
+    # ATM Strike IV Details
     atm_row = df_oc[df_oc["Strike"] == atm_strike]
     if not atm_row.empty:
         atm_ce_iv = atm_row["CE_IV"].values[0]
@@ -491,23 +521,13 @@ elif df_oc is not None and not df_oc.empty:
     else:
         target_ce_iv, target_pe_iv, target_iv_spread = 0.0, 0.0, 0.0
 
-    # Intraday Time-Series Accumulation
+    # Intraday Accumulation Logic
     hist_df = st.session_state["iv_spread_history"]
     if is_market_live and not hist_df.empty:
         last_rec_date = hist_df.iloc[-1].get("Date", "")
         if last_rec_date != today_date_str:
             st.session_state["iv_spread_history"] = pd.DataFrame(
-                columns=[
-                    "Date",
-                    "Time",
-                    "ATM_Strike",
-                    "Target_Strike",
-                    "ATM_CE_IV",
-                    "ATM_PE_IV",
-                    "ATM_IV_Spread",
-                    "Target_IV_Spread",
-                    "Spot",
-                ]
+                columns=REQUIRED_HIST_COLS
             )
             hist_df = st.session_state["iv_spread_history"]
 
@@ -802,13 +822,13 @@ elif df_oc is not None and not df_oc.empty:
                 "⏳ **Accumulating Session Ticks:** The live intraday graph updates automatically over the market session."
             )
 
-    # TAB 3: Term Structure & Forward Vol (Matches Image Dashboard)
+    # TAB 3: Term Structure & Forward Vol
     with tab3:
         st.subheader("Forward Volatility Term Structure & Vol Curve")
 
         df_vol_struct = fetch_multi_expiry_vol_structure(spot_price)
 
-        if not df_vol_struct.empty:
+        if not df_vol_struct.empty and len(df_vol_struct) >= 2:
             v_left, v_right = st.columns(2)
 
             with v_left:
@@ -855,7 +875,9 @@ elif df_oc is not None and not df_oc.empty:
                 )
                 st.plotly_chart(fig_vol_curve, use_container_width=True)
         else:
-            st.warning("Unable to build multi-expiry term structure.")
+            st.warning(
+                "⚠️ **Term Structure Data Building:** Additional expiries are loading or market feeds are paused outside trading hours."
+            )
 
     # TAB 4: Net GEX
     with tab4:
