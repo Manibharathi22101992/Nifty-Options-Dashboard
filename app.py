@@ -54,6 +54,7 @@ st.markdown(
         border-radius: 6px;
         padding: 12px;
         margin-bottom: 16px;
+        position: relative;
     }
     .chart-title {
         font-size: 0.85rem;
@@ -65,14 +66,53 @@ st.markdown(
         padding-bottom: 5px;
     }
 
-    /* Tradytics Style Info Icon */
-    .info-icon {
-        font-size: 0.85rem;
-        color: #8A93A6;
+    /* CSS-Based Tooltip for Streamlit Compatibility */
+    .info-tooltip {
+        position: relative;
+        display: inline-block;
         cursor: help;
+        color: #8A93A6;
         float: right;
+        margin-left: 5px;
+        font-size: 0.9rem;
     }
-    .info-icon:hover { color: #FFFFFF; }
+    .info-tooltip .tooltip-text {
+        visibility: hidden;
+        width: 260px;
+        background-color: #1E2638;
+        color: #E0E6ED;
+        text-align: left;
+        border-radius: 6px;
+        padding: 10px 14px;
+        position: absolute;
+        z-index: 99999;
+        bottom: 130%; 
+        right: -10px; /* Align to the right side of the icon */
+        opacity: 0;
+        transition: opacity 0.2s;
+        border: 1px solid #3B4252;
+        font-size: 0.75rem;
+        font-weight: 500;
+        box-shadow: 0px 4px 15px rgba(0,0,0,0.8);
+        line-height: 1.4;
+        text-transform: none;
+        letter-spacing: normal;
+    }
+    /* Arrow for tooltip */
+    .info-tooltip .tooltip-text::after {
+        content: "";
+        position: absolute;
+        top: 100%;
+        right: 15px;
+        border-width: 6px;
+        border-style: solid;
+        border-color: #3B4252 transparent transparent transparent;
+    }
+    .info-tooltip:hover .tooltip-text {
+        visibility: visible;
+        opacity: 1;
+    }
+    .info-tooltip:hover { color: #FFFFFF; }
 
     /* Status Badges */
     .status-badge {
@@ -86,7 +126,7 @@ st.markdown(
     .status-live { background-color: rgba(0, 230, 118, 0.15); border: 1px solid #00E676; color: #00E676; }
     .status-closed { background-color: rgba(255, 167, 38, 0.15); border: 1px solid #FFA726; color: #FFA726; }
     
-    /* Playbook Table styling */
+    /* Playbook Table */
     .summary-box { background: #121824; border: 1px solid #2A2E39; border-radius: 8px; padding: 16px 20px; margin-bottom: 20px; }
     .playbook-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; margin-top: 10px; }
     .playbook-table th { background-color: #1e2638; color: #8b9bb4; text-align: left; padding: 8px; border: 1px solid #2A2E39; }
@@ -358,11 +398,14 @@ elif df_oc is not None and not df_oc.empty:
     call_wall_strike = int(df_oc.loc[df_oc["Call_GEX"].idxmax()]["Strike"])
     put_wall_strike = int(df_oc.loc[df_oc["Put_GEX"].idxmin()]["Strike"])
 
+    # Calculate Proper Cumulative Gamma Flip
     df_sorted = df_oc.sort_values("Strike").copy()
+    df_sorted["Cum_Net_GEX"] = df_sorted["Net_GEX"].cumsum()
     gamma_flip_strike = int(spot_price)
+    
     for i in range(1, len(df_sorted)):
-        prev_val = df_sorted.iloc[i - 1]["Net_GEX"]
-        curr_val = df_sorted.iloc[i]["Net_GEX"]
+        prev_val = df_sorted.iloc[i - 1]["Cum_Net_GEX"]
+        curr_val = df_sorted.iloc[i]["Cum_Net_GEX"]
         if (prev_val < 0 and curr_val >= 0) or (prev_val > 0 and curr_val <= 0):
             s1, s2 = df_sorted.iloc[i - 1]["Strike"], df_sorted.iloc[i]["Strike"]
             gamma_flip_strike = int((s1 + s2) / 2.0)
@@ -374,9 +417,8 @@ elif df_oc is not None and not df_oc.empty:
     target_pe_iv = target_row["PE_IV"].values[0] if not target_row.empty else 0.0
     target_iv_spread = target_ce_iv - target_pe_iv
 
-    df_filtered = df_oc[(df_oc["Strike"] >= atm_strike - 500) & (df_oc["Strike"] <= atm_strike + 500)].copy()
-    
-    # We keep labels as strings for the Plotly Custom Ticktext
+    # Filtered view for charts
+    df_filtered = df_oc[(df_oc["Strike"] >= atm_strike - 550) & (df_oc["Strike"] <= atm_strike + 550)].copy()
     strike_labels = df_filtered["Strike"].astype(str).tolist()
 
     total_net_gex = df_oc["Net_GEX"].sum()
@@ -470,7 +512,7 @@ elif df_oc is not None and not df_oc.empty:
     with m1:
         st.markdown(f"""
             <div class="metric-card metric-card-amber">
-                <span class="info-icon" title="Current Spot Price rounded to closest ATM strike.">ⓘ</span>
+                <div class="info-tooltip">ⓘ<span class="tooltip-text">Current Spot Price of Nifty 50, tracked against the closest ATM option strike boundary.</span></div>
                 <div class="metric-title">NIFTY SPOT</div>
                 <div class="metric-value">₹{spot_price:,.2f}</div>
                 <div class="metric-sub sub-amber">ATM: {atm_strike}</div>
@@ -482,7 +524,7 @@ elif df_oc is not None and not df_oc.empty:
         border_class = "metric-card-green" if target_iv_spread >= 0 else "metric-card-red"
         st.markdown(f"""
             <div class="metric-card {border_class}">
-                <span class="info-icon" title="Measures Call IV vs Put IV. Rising spread implies Stealth Call accumulation (Bullish). Falling spread implies Put accumulation (Bearish).">ⓘ</span>
+                <div class="info-tooltip">ⓘ<span class="tooltip-text"><b>IV Spread = Call IV - Put IV.</b><br>Rising values indicate institutional stealth accumulation of Calls. Falling values indicate accumulation of Puts.</span></div>
                 <div class="metric-title">{selected_target_strike} IV SPREAD</div>
                 <div class="metric-value">{target_iv_spread:+.2f}%</div>
                 <div class="metric-sub {spread_class}">CE {target_ce_iv:.1f}% | PE {target_pe_iv:.1f}%</div>
@@ -494,7 +536,7 @@ elif df_oc is not None and not df_oc.empty:
         p_border = "metric-card-green" if delta_pcr_15m >= 0.15 else ("metric-card-red" if delta_pcr_15m <= -0.15 else "metric-card-amber")
         st.markdown(f"""
             <div class="metric-card {p_border}">
-                <span class="info-icon" title="Rate of change of PCR over 15 mins. > +0.15 = Aggressive Put writing. < -0.15 = Aggressive Call writing.">ⓘ</span>
+                <div class="info-tooltip">ⓘ<span class="tooltip-text"><b>Rate of Change of PCR (15m window).</b><br>> +0.15 = Aggressive Put Writing (Bullish).<br>< -0.15 = Aggressive Call Writing (Bearish).</span></div>
                 <div class="metric-title">ΔPCR 15M VELOCITY</div>
                 <div class="metric-value">{delta_pcr_15m:+.2f}</div>
                 <div class="metric-sub {pcr_color}">PCR: {current_pcr:.2f}</div>
@@ -505,7 +547,7 @@ elif df_oc is not None and not df_oc.empty:
         d_border = "metric-card-green" if total_net_delta_oi >= 0 else "metric-card-red"
         st.markdown(f"""
             <div class="metric-card {d_border}">
-                <span class="info-icon" title="Net directional exposure. Positive value = Dealers are short delta, forcing them to buy dips (Supportive).">ⓘ</span>
+                <div class="info-tooltip">ⓘ<span class="tooltip-text"><b>Net Delta Exposure (Rupee Value).</b><br>Positive = Dealers are short delta, forcing them to buy market dips to stay hedged (Supportive Environment).</span></div>
                 <div class="metric-title">NET DELTA DEX</div>
                 <div class="metric-value">₹{total_net_dex_crores:+.2f} Cr</div>
                 <div class="metric-sub {dir_color}">{total_net_delta_oi:+,.0f} Cont</div>
@@ -517,7 +559,7 @@ elif df_oc is not None and not df_oc.empty:
         g_border = "metric-card-green" if total_net_gex >= 0 else "metric-card-red"
         st.markdown(f"""
             <div class="metric-card {g_border}">
-                <span class="info-icon" title="Total market Gamma Exposure. Positive = Volatility dampening (Mean Reversion). Negative = Volatility amplification (Squeezes).">ⓘ</span>
+                <div class="info-tooltip">ⓘ<span class="tooltip-text"><b>Raw Gamma Exposure (Total).</b><br>Positive = Dealers buy dips & sell rips (Volatility Dampening).<br>Negative = Dealers sell dips & buy rips (Volatility Expansion).</span></div>
                 <div class="metric-title">RAW NET GEX</div>
                 <div class="metric-value">₹{total_net_gex:,.1f}L</div>
                 <div class="metric-sub {gex_color}">Across Chain</div>
@@ -527,7 +569,7 @@ elif df_oc is not None and not df_oc.empty:
     with m6:
         st.markdown(f"""
             <div class="metric-card {z_card_border}">
-                <span class="info-icon" title="Rolling Statistical Gamma Regime. Drops below -2.0 signal complete structural failure of dealer stabilizing power, prime for buying options.">ⓘ</span>
+                <div class="info-tooltip">ⓘ<span class="tooltip-text"><b>Statistical Gamma Regime.</b><br>When Z-GEX drops below -2.0, dealer stabilizing power has mathematically collapsed. Prime regime for buying options and capturing multi-strike squeezes.</span></div>
                 <div class="metric-title">Z-GEX SCORE</div>
                 <div class="metric-value">{current_z_gex:+.2f}</div>
                 <div class="metric-sub {z_color}">{z_signal}</div>
@@ -538,7 +580,7 @@ elif df_oc is not None and not df_oc.empty:
     r2_col1, r2_col2 = st.columns(2)
 
     with r2_col1:
-        st.markdown(f'<div class="chart-container"><div class="chart-title">Intraday IV Spread Movement ({selected_target_strike}) <span class="info-icon" title="Tracks the tick-by-tick difference between Call IV and Put IV. Watch for divergences from spot price to front-run institutional orders.">ⓘ</span></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="chart-container"><div class="info-tooltip">ⓘ<span class="tooltip-text">Tracks the exact tick-by-tick difference between Call IV and Put IV for the specific strike selected. Look for upward divergences (stealth call buying) before the spot price breaks out.</span></div><div class="chart-title">Intraday IV Spread Movement ({selected_target_strike})</div>', unsafe_allow_html=True)
         fig_ts = go.Figure()
         strike_history = st.session_state["iv_spread_history"]
         strike_history = strike_history[strike_history["Strike"] == selected_target_strike]
@@ -551,7 +593,7 @@ elif df_oc is not None and not df_oc.empty:
         st.markdown('</div>', unsafe_allow_html=True)
 
     with r2_col2:
-        st.markdown('<div class="chart-container"><div class="chart-title">15-Min PCR Velocity (ΔPCR) <span class="info-icon" title="Identifies sudden, aggressive option writing. A bar shooting above the green line means aggressive intraday put writing (support). Below red means aggressive call writing (resistance).">ⓘ</span></div>', unsafe_allow_html=True)
+        st.markdown('<div class="chart-container"><div class="info-tooltip">ⓘ<span class="tooltip-text">Measures the speed of option writing. Bars breaking above the green dashed line (+0.15) signal aggressive Put writing/Support. Bars breaking below the red dashed line (-0.15) signal aggressive Call writing/Resistance.</span></div><div class="chart-title">15-Min PCR Velocity (ΔPCR)</div>', unsafe_allow_html=True)
         fig_pcr = go.Figure()
         if not pcr_df.empty:
             colors = ["#00E676" if v >= 0.15 else ("#FF5252" if v <= -0.15 else "#8A93A6") for v in pcr_df["Delta_PCR_15m"]]
@@ -567,34 +609,28 @@ elif df_oc is not None and not df_oc.empty:
     r3_col1, r3_col2 = st.columns(2)
 
     with r3_col1:
-        st.markdown('<div class="chart-container"><div class="chart-title">Net Delta Exposure (DEX) By Strike <span class="info-icon" title="Total Rupee Value of Delta per strike. Visualizes where directional bias is heavily concentrated. Shows expected dealer hedging flows.">ⓘ</span></div>', unsafe_allow_html=True)
+        st.markdown('<div class="chart-container"><div class="info-tooltip">ⓘ<span class="tooltip-text">Total Rupee Value of Delta per strike. Visualizes where directional bias is heavily concentrated and where dealer hedging flows are trapped. Includes the current Spot line.</span></div><div class="chart-title">Net Delta Exposure (DEX) By Strike</div>', unsafe_allow_html=True)
         fig_dex = go.Figure()
         colors_dex = ["#00E676" if val >= 0 else "#FF5252" for val in df_filtered["Net_DEX"]]
         fig_dex.add_trace(go.Bar(x=df_filtered["Strike"], y=df_filtered["Net_DEX"], marker_color=colors_dex))
         
-        # Add Spot & Flip Lines to DEX
+        # Add Spot Line to DEX (NO FLIP LINE)
         fig_dex.add_vline(x=spot_price, line_dash="solid", line_color="#FFD700")
         fig_dex.add_annotation(x=spot_price, y=0.95, yref="paper", text="Spot", showarrow=False, font=dict(color="#FFD700", size=10), xanchor="left")
-        fig_dex.add_vline(x=gamma_flip_strike, line_dash="dash", line_color="#29B6F6")
-        fig_dex.add_annotation(x=gamma_flip_strike, y=0.85, yref="paper", text="Flip", showarrow=False, font=dict(color="#29B6F6", size=10), xanchor="left")
         
-        # Apply Categorical Styling to Numeric Axis (To Prevent Plotly Bug)
-        fig_dex.update_xaxes(
-            tickmode='array', tickvals=df_filtered["Strike"], ticktext=strike_labels, 
-            tickangle=-45, gridcolor="#2A2E39"
-        )
+        fig_dex.update_xaxes(range=[atm_strike - 550, atm_strike + 550], tickmode='array', tickvals=df_filtered["Strike"], ticktext=strike_labels, tickangle=-45, gridcolor="#2A2E39")
         fig_dex.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", margin=dict(l=0, r=0, t=10, b=0), height=250)
         st.plotly_chart(fig_dex, use_container_width=True)
         st.markdown('</div>', unsafe_allow_html=True)
 
     with r3_col2:
-        st.markdown('<div class="chart-container"><div class="chart-title">Normalized Gamma Z-Score (ZGEX) Tracker <span class="info-icon" title="Isolates structural regime shifts by comparing current GEX to its rolling mean. Breakdowns past -2.0 warn of extreme impending volatility and squeezes.">ⓘ</span></div>', unsafe_allow_html=True)
+        st.markdown('<div class="chart-container"><div class="info-tooltip">ⓘ<span class="tooltip-text">Isolates structural regime shifts by comparing current GEX to its rolling mean. Watch for lines dipping below -2.0, which confirms a total regime collapse where dealers are forced to violently buy rips and sell dips.</span></div><div class="chart-title">Normalized Gamma Z-Score (ZGEX) Tracker</div>', unsafe_allow_html=True)
         fig_zgex = go.Figure()
         if not gex_df.empty:
             fig_zgex.add_trace(go.Scatter(x=gex_df["Time"], y=gex_df["Z_GEX"], mode="lines", fill='tozeroy', line=dict(color="#AB47BC", width=2)))
         fig_zgex.add_hline(y=1.0, line_dash="solid", line_color="#00E676", opacity=0.3)
         fig_zgex.add_hline(y=-1.0, line_dash="solid", line_color="#00E676", opacity=0.3)
-        fig_zgex.add_hline(y=-2.0, line_dash="dash", line_color="#FF5252", annotation_text="Collapse")
+        fig_zgex.add_hline(y=-2.0, line_dash="dash", line_color="#FF5252", annotation_text="Collapse", annotation_font=dict(color="#FF5252"))
         fig_zgex.update_xaxes(range=["09:15:00", "15:30:00"], dtick="3600000", gridcolor="#2A2E39")
         fig_zgex.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", margin=dict(l=0, r=0, t=10, b=0), height=250)
         st.plotly_chart(fig_zgex, use_container_width=True)
@@ -604,7 +640,7 @@ elif df_oc is not None and not df_oc.empty:
     r4_col1, r4_col2, r4_col3 = st.columns(3)
 
     with r4_col1:
-        st.markdown('<div class="chart-container"><div class="chart-title">Net GEX Profile <span class="info-icon" title="Identifies Resistance (Call Walls - Red) and Support (Put Walls - Green). Yellow line marks Spot, Blue marks Gamma Flip level.">ⓘ</span></div>', unsafe_allow_html=True)
+        st.markdown('<div class="chart-container"><div class="info-tooltip">ⓘ<span class="tooltip-text">Identifies Resistance (Call Walls - Red) and Support (Put Walls - Green). Yellow line marks the Spot Price, Blue dashed line marks the Gamma Flip Level (Zero-crossing).</span></div><div class="chart-title">Net GEX Profile</div>', unsafe_allow_html=True)
         fig_gex = go.Figure()
         colors_gex = ["#00E676" if g >= 0 else "#FF5252" for g in df_filtered["Net_GEX"]]
         fig_gex.add_trace(go.Bar(x=df_filtered["Strike"], y=df_filtered["Net_GEX"], marker_color=colors_gex))
@@ -616,25 +652,25 @@ elif df_oc is not None and not df_oc.empty:
         fig_gex.add_vline(x=gamma_flip_strike, line_dash="dash", line_color="#29B6F6")
         fig_gex.add_annotation(x=gamma_flip_strike, y=0.85, yref="paper", text="Flip", showarrow=False, font=dict(color="#29B6F6", size=10), xanchor="left")
         
-        fig_gex.update_xaxes(tickmode='array', tickvals=df_filtered["Strike"], ticktext=strike_labels, tickangle=-45, gridcolor="#2A2E39")
+        fig_gex.update_xaxes(range=[atm_strike - 550, atm_strike + 550], tickmode='array', tickvals=df_filtered["Strike"], ticktext=strike_labels, tickangle=-45, gridcolor="#2A2E39")
         fig_gex.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", margin=dict(l=0, r=0, t=10, b=0), height=240, showlegend=False)
         st.plotly_chart(fig_gex, use_container_width=True)
         st.markdown('</div>', unsafe_allow_html=True)
 
     with r4_col2:
-        st.markdown('<div class="chart-container"><div class="chart-title">Vanna Exposure (VEX) <span class="info-icon" title="Sensitivity of Dealer Delta to changes in IV. Strikes with massive Vanna peaks act as strong magnets during high-volatility shifts.">ⓘ</span></div>', unsafe_allow_html=True)
+        st.markdown('<div class="chart-container"><div class="info-tooltip">ⓘ<span class="tooltip-text">Sensitivity of Dealer Delta to changes in Implied Volatility. Strikes with massive Vanna peaks act as strong price magnets during high-volatility shifts or news events.</span></div><div class="chart-title">Vanna Exposure (VEX)</div>', unsafe_allow_html=True)
         fig_vex = go.Figure()
         fig_vex.add_trace(go.Scatter(x=df_filtered["Strike"], y=df_filtered["Net_VEX"], mode="lines+markers", line=dict(color="#FFA726", width=2)))
-        fig_vex.update_xaxes(tickmode='array', tickvals=df_filtered["Strike"], ticktext=strike_labels, tickangle=-45, gridcolor="#2A2E39")
+        fig_vex.update_xaxes(range=[atm_strike - 550, atm_strike + 550], tickmode='array', tickvals=df_filtered["Strike"], ticktext=strike_labels, tickangle=-45, gridcolor="#2A2E39")
         fig_vex.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", margin=dict(l=0, r=0, t=10, b=0), height=240)
         st.plotly_chart(fig_vex, use_container_width=True)
         st.markdown('</div>', unsafe_allow_html=True)
 
     with r4_col3:
-        st.markdown('<div class="chart-container"><div class="chart-title">Charm Exposure (CHEX) <span class="info-icon" title="Dealer Delta adjustments driven entirely by the passage of time (Theta). Determines end-of-day hedging flows.">ⓘ</span></div>', unsafe_allow_html=True)
+        st.markdown('<div class="chart-container"><div class="info-tooltip">ⓘ<span class="tooltip-text">Dealer Delta adjustments driven entirely by the passage of time (Theta bleed). CHEX dictates where dealers must buy/sell to remain hedged as the clock approaches 3:30 PM.</span></div><div class="chart-title">Charm Exposure (CHEX)</div>', unsafe_allow_html=True)
         fig_chex = go.Figure()
         fig_chex.add_trace(go.Scatter(x=df_filtered["Strike"], y=df_filtered["Net_CHEX"], mode="lines+markers", line=dict(color="#AB47BC", width=2)))
-        fig_chex.update_xaxes(tickmode='array', tickvals=df_filtered["Strike"], ticktext=strike_labels, tickangle=-45, gridcolor="#2A2E39")
+        fig_chex.update_xaxes(range=[atm_strike - 550, atm_strike + 550], tickmode='array', tickvals=df_filtered["Strike"], ticktext=strike_labels, tickangle=-45, gridcolor="#2A2E39")
         fig_chex.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", margin=dict(l=0, r=0, t=10, b=0), height=240)
         st.plotly_chart(fig_chex, use_container_width=True)
         st.markdown('</div>', unsafe_allow_html=True)
@@ -644,7 +680,7 @@ elif df_oc is not None and not df_oc.empty:
     df_vol_struct = fetch_multi_expiry_vol_structure(spot_price)
 
     with r5_col1:
-        st.markdown('<div class="chart-container"><div class="chart-title">Forward Volatility Term Structure (4 Expiries) <span class="info-icon" title="Plots implied forward variance. Normal markets exhibit an upward slope (Contango). A downward slope (Backwardation) flags near-term fear and extreme panic pricing in front-month options.">ⓘ</span></div>', unsafe_allow_html=True)
+        st.markdown('<div class="chart-container"><div class="info-tooltip">ⓘ<span class="tooltip-text">Plots implied forward variance. Normal markets exhibit an upward slope (Contango). A downward slope (Backwardation) flags near-term fear and extreme panic pricing in front-month options.</span></div><div class="chart-title">Forward Vol Term Structure (4 Expiries)</div>', unsafe_allow_html=True)
         if not df_vol_struct.empty and len(df_vol_struct) >= 2:
             fig_fwd = go.Figure()
             fig_fwd.add_trace(go.Scatter(x=df_vol_struct["Expiry"], y=df_vol_struct["Forward_Vol"], mode="lines+markers", line=dict(color="#00E676", width=2.5), marker=dict(size=8)))
@@ -655,7 +691,7 @@ elif df_oc is not None and not df_oc.empty:
         st.markdown('</div>', unsafe_allow_html=True)
 
     with r5_col2:
-        st.markdown('<div class="chart-container"><div class="chart-title">Cumulative Mean Volatility Curve <span class="info-icon" title="Displays the raw ATM Average Implied Volatility plotted across the upcoming 4 valid expiry dates.">ⓘ</span></div>', unsafe_allow_html=True)
+        st.markdown('<div class="chart-container"><div class="info-tooltip">ⓘ<span class="tooltip-text">Displays the raw ATM Average Implied Volatility plotted across the upcoming 4 valid expiry dates.</span></div><div class="chart-title">Cumulative Mean Volatility Curve</div>', unsafe_allow_html=True)
         if not df_vol_struct.empty and len(df_vol_struct) >= 2:
             fig_vol_curve = go.Figure()
             fig_vol_curve.add_trace(go.Scatter(x=df_vol_struct["Expiry"], y=df_vol_struct["Mean_IV"], mode="lines+markers", line=dict(color="#AB47BC", width=2.5), marker=dict(size=8)))
