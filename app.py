@@ -3,7 +3,6 @@ import math
 import time
 import os
 import threading
-import json
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -11,10 +10,12 @@ import requests
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
+# Graceful fallback in case dhanhq isn't in requirements.txt yet
 try:
-    import websocket
+    from dhanhq import marketfeed
+    DHAN_WS_AVAILABLE = True
 except ImportError:
-    pass # Provide graceful fallback if websocket-client is missing
+    DHAN_WS_AVAILABLE = False
 
 # ---------------------------------------------------------
 # 1. PAGE SETUP & TRADYTICS-STYLE TERMINAL CSS
@@ -146,7 +147,6 @@ if not CLIENT_ID or not ACCESS_TOKEN:
 
 NIFTY_LOT_SIZE = 25
 
-
 # ---------------------------------------------------------
 # 2. LOCAL PARQUET PERSISTENCE & WEBSOCKET DAEMON
 # ---------------------------------------------------------
@@ -167,41 +167,70 @@ def check_and_reset(df_name, cols, today_date_str, now_time_str):
     df = get_persisted_df(df_name, cols)
     if not df.empty:
         last_date = df.iloc[-1]["Date"]
-        # Retain yesterday's data UNTIL 09:15 AM today, then wipe clean for the new session.
+        # Retain yesterday's data UNTIL 09:15 AM today
         if last_date != today_date_str and now_time_str >= "09:15:00":
             df = pd.DataFrame(columns=cols)
             save_persisted_df(df, df_name)
     return df
 
 @st.cache_resource
-def start_dhan_websocket():
-    ws_data = {"RELIANCE": 0.0, "HDFCBANK": 0.0, "ICICIBANK": 0.0, "NIFTY_FUT": 0.0, "CVD": 0.0, "CONNECTED": False}
+def start_dhan_websocket(client_id, access_token):
+    ws_data = {
+        "RELIANCE_LTP": 0.0, "RELIANCE_PREV": 0.0,
+        "HDFCBANK_LTP": 0.0, "HDFCBANK_PREV": 0.0,
+        "ICICIBANK_LTP": 0.0, "ICICIBANK_PREV": 0.0,
+        "NIFTY_FUT_LTP": 0.0, "CVD": 0.0, "CONNECTED": False
+    }
+
+    if not DHAN_WS_AVAILABLE:
+        ws_data["ERROR"] = "dhanhq not installed in requirements.txt"
+        return ws_data
+
+    # IMPORTANT: Update this Nifty Futures ID when the monthly contract expires
+    CURRENT_NIFTY_FUT_ID = "58756" 
     
-    def on_message(ws, message):
-        # Implementation placeholder: Parse Binary Market Feed and update ws_data dict keys
-        pass
-    def on_error(ws, error): pass
-    def on_close(ws, close_status_code, close_msg): ws_data["CONNECTED"] = False
-    def on_open(ws):
-        ws_data["CONNECTED"] = True
-        # Send Binary Subscription Packets here for NIFTY FUT, RELIANCE, HDFC, ICICI
-        pass
+    instruments = {
+        marketfeed.NSE: ["2885", "1333", "4963"], # Reliance, HDFC, ICICI
+        marketfeed.FNO: [CURRENT_NIFTY_FUT_ID]
+    }
+
+    def on_connect(instance): ws_data["CONNECTED"] = True
+    def on_disconnect(instance): ws_data["CONNECTED"] = False
+
+    def on_message(instance, message):
+        if 'security_id' not in message or 'LTP' not in message: return
+        sec_id = str(message['security_id'])
+        ltp = float(message['LTP'])
+        ltq = float(message.get('last_trade_quantity', 0))
+        
+        if sec_id == "2885": update_cvd("RELIANCE", ltp, ltq)
+        elif sec_id == "1333": update_cvd("HDFCBANK", ltp, ltq)
+        elif sec_id == "4963": update_cvd("ICICIBANK", ltp, ltq)
+        elif sec_id == CURRENT_NIFTY_FUT_ID: ws_data["NIFTY_FUT_LTP"] = ltp
+
+    def update_cvd(symbol, ltp, ltq):
+        prev_ltp = ws_data[f"{symbol}_PREV"]
+        if prev_ltp > 0:
+            if ltp > prev_ltp: ws_data["CVD"] += ltq
+            elif ltp < prev_ltp: ws_data["CVD"] -= ltq
+        ws_data[f"{symbol}_LTP"] = ltp
+        ws_data[f"{symbol}_PREV"] = ltp
 
     def run_ws():
         try:
-            ws = websocket.WebSocketApp("wss://api-feed.dhan.co", on_open=on_open, on_message=on_message, on_error=on_error, on_close=on_close)
-            ws.run_forever()
+            feed = marketfeed.DhanFeed(client_id, access_token, instruments, subscription_code=marketfeed.Ticker, on_connect=on_connect, on_message=on_message, on_close=on_disconnect)
+            feed.run_forever()
         except Exception: pass
-            
+
     t = threading.Thread(target=run_ws, daemon=True)
     t.start()
     return ws_data
 
-live_ws_data = start_dhan_websocket()
+live_ws_data = start_dhan_websocket(CLIENT_ID, ACCESS_TOKEN)
 
 
 # ---------------------------------------------------------
-# 3. BLACK-SCHOLES GREEK ENGINE (INCLUDING SPEX)
+# 3. BLACK-SCHOLES GREEK ENGINE (WITH SPEED/SPEX)
 # ---------------------------------------------------------
 def calculate_bs_greeks(S, K, T, sigma, r=0.07):
     if T <= 1e-5 or sigma <= 1e-4 or S <= 0 or K <= 0:
@@ -217,7 +246,6 @@ def calculate_bs_greeks(S, K, T, sigma, r=0.07):
         return gamma, vanna, charm, speed
     except Exception:
         return 0.0, 0.0, 0.0, 0.0
-
 
 # ---------------------------------------------------------
 # 4. DIRECT REST API DATA ENGINE
@@ -259,7 +287,9 @@ def fetch_gex_option_chain(expiry_date):
                 put_gex = (-pe_oi * pe_gamma * (spot_price**2) * 0.01 * NIFTY_LOT_SIZE / 1e5)
                 net_gex = call_gex + put_gex
 
-                net_delta_oi = (ce_oi * ce_delta) + (pe_oi * pe_delta)
+                ce_delta_oi = ce_oi * ce_delta
+                pe_delta_oi = pe_oi * pe_delta
+                net_delta_oi = ce_delta_oi + pe_delta_oi
                 net_dex = net_delta_oi * spot_price * NIFTY_LOT_SIZE / 1e5
 
                 records.append({
@@ -302,8 +332,6 @@ def fetch_multi_expiry_vol_structure(spot_price):
         if idx > 0: time.sleep(1.2)
         df_exp, exp_spot, _ = fetch_gex_option_chain(exp)
         if df_exp is not None and not df_exp.empty:
-            
-            # --- SYNTHETIC FUTURE BASED ATM CALCULATION PER EXPIRY ---
             temp_spot_atm = int(round(exp_spot / 50) * 50)
             temp_row = df_exp[df_exp["Strike"] == temp_spot_atm]
             if not temp_row.empty: exp_synth = temp_spot_atm + temp_row["CE_LTP"].values[0] - temp_row["PE_LTP"].values[0]
@@ -391,6 +419,17 @@ if "synth_history" not in st.session_state: st.session_state["synth_history"] = 
 if "delta_oi_history" not in st.session_state: st.session_state["delta_oi_history"] = check_and_reset("delta_oi_history", REQUIRED_DELTA_COLS, today_date_str, now_time_str)
 if "straddle_history" not in st.session_state: st.session_state["straddle_history"] = check_and_reset("straddle_history", REQUIRED_STRADDLE_COLS, today_date_str, now_time_str)
 if "straddle_anchor_price" not in st.session_state: st.session_state["straddle_anchor_price"] = None
+
+if st.sidebar.button("🗑️ Reset Session Cache"):
+    st.session_state["iv_spread_history"] = pd.DataFrame(columns=REQUIRED_HIST_COLS)
+    st.session_state["pcr_history"] = pd.DataFrame(columns=REQUIRED_PCR_COLS)
+    st.session_state["gex_history"] = pd.DataFrame(columns=REQUIRED_GEX_COLS)
+    st.session_state["synth_history"] = pd.DataFrame(columns=REQUIRED_SYNTH_COLS)
+    st.session_state["delta_oi_history"] = pd.DataFrame(columns=REQUIRED_DELTA_COLS)
+    st.session_state["straddle_history"] = pd.DataFrame(columns=REQUIRED_STRADDLE_COLS)
+    st.session_state["straddle_anchor_price"] = None
+    st.cache_data.clear()
+    st.rerun()
 
 
 # ---------------------------------------------------------
@@ -721,7 +760,7 @@ elif df_oc is not None and not df_oc.empty:
             fig_synth.add_trace(go.Scatter(x=synth_df["Time"], y=synth_df["Synth_P50"], mode="lines", name="OTM Synth", line=dict(color="#FF5252", width=1.5, dash="dot")))
         fig_synth.update_xaxes(range=["09:15:00", "15:30:00"], dtick="3600000", gridcolor="#2A2E39")
         fig_synth.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", margin=dict(l=0, r=0, t=10, b=0), height=230, legend=dict(orientation="h", y=1.1))
-        st.plotly_chart(fig_synth, use_container_width=True, key="chart_synth")
+        st.plotly_chart(fig_synth, use_container_width=True, key="chart_synth_par")
         st.markdown('</div>', unsafe_allow_html=True)
 
     # ================= ROW 6: EXPOSURE PROFILES (DEX & GEX ADJACENT) =================
@@ -826,17 +865,107 @@ elif df_oc is not None and not df_oc.empty:
             st.info("Loading 4 expiries to build vol curve... (Takes ~5 seconds due to API limits)")
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # ================= ROW 10: WEBSOCKET HEAVYWEIGHT BASKET (STANDBY) =================
-    st.markdown('<div class="chart-container"><div class="info-tooltip">ⓘ<span class="tooltip-text">Tracks the Basis (Futures - Spot) and the Cumulative Volume Delta of top index heavyweights via WebSocket. Validates the structural strength of breakouts.</span></div><div class="chart-title">Futures Basis & Heavyweight CVD Filter (WebSocket Live)</div>', unsafe_allow_html=True)
-    c_hw1, c_hw2 = st.columns([1, 2])
+    # ================= ROW 10: WEBSOCKET HEAVYWEIGHT BASKET =================
+    st.markdown('<div class="chart-container"><div class="info-tooltip">ⓘ<span class="tooltip-text">Tracks the Basis (Futures - Spot) and the Cumulative Volume Delta of top index heavyweights via WebSocket. Validates the structural strength of breakouts.</span></div><div class="chart-title">Futures Basis & Heavyweight CVD Filter (Live WebSocket)</div>', unsafe_allow_html=True)
+    
+    nifty_fut = live_ws_data.get("NIFTY_FUT_LTP", 0.0)
+    basis = nifty_fut - spot_price if nifty_fut > 0 else 0.0
+    basis_color = "sub-green" if basis >= 0 else "sub-red"
+    cvd_val = live_ws_data.get("CVD", 0.0)
+    cvd_color = "sub-green" if cvd_val >= 0 else "sub-red"
+    
+    c_hw1, c_hw2, c_hw3, c_hw4 = st.columns(4)
+    
     with c_hw1:
-        st.metric("Live Nifty Futures", f"₹{live_ws_data['NIFTY_FUT']:,.2f}")
-        st.metric("Heavyweights Net CVD", f"{live_ws_data['CVD']:,.0f}")
+        st.metric("Live Nifty Futures", f"₹{nifty_fut:,.2f}" if nifty_fut > 0 else "Awaiting Tick...")
     with c_hw2:
-        st.info("⚡ **Dhan WebSocket Daemon is Running in Background.**\n\nTo populate this panel with live tick data, map your exact Security IDs (Reliance=2885, HDFCBANK=1333, etc.) inside the `on_open` and `on_message` parser block in the `start_dhan_websocket` function of the code.")
+        st.markdown(f"""
+            <div>
+                <div style="color: #8A93A6; font-size: 0.85rem; font-weight: 600;">FUTURES BASIS</div>
+                <div style="font-size: 1.5rem; font-weight: 700; margin-top: 5px;" class="{basis_color}">{basis:+.2f} Pts</div>
+            </div>
+        """, unsafe_allow_html=True)
+    with c_hw3:
+        st.markdown(f"""
+            <div>
+                <div style="color: #8A93A6; font-size: 0.85rem; font-weight: 600;">HEAVYWEIGHT NET CVD</div>
+                <div style="font-size: 1.5rem; font-weight: 700; margin-top: 5px;" class="{cvd_color}">{cvd_val:+,.0f} Vol</div>
+            </div>
+        """, unsafe_allow_html=True)
+    with c_hw4:
+        conn_status = "🟢 ACTIVE" if live_ws_data.get("CONNECTED") else f"🔴 {live_ws_data.get('ERROR', 'RECONNECTING...')}"
+        st.markdown(f"""
+            <div>
+                <div style="color: #8A93A6; font-size: 0.85rem; font-weight: 600;">DAEMON STATUS</div>
+                <div style="font-size: 1.1rem; font-weight: 700; margin-top: 5px;">{conn_status}</div>
+            </div>
+        """, unsafe_allow_html=True)
+        
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # ================= ROW 11: DATA GRID =================
+    # ================= ROW 11: INSTITUTIONAL PLAYBOOK EXPANDER =================
+    with st.expander("📖 Institutional Playbook: How to Trade Nifty Using Relative Option Demand", expanded=False):
+        st.markdown("""
+            Monitoring the **ATM IV Spread (IV_Call - IV_Put)** provides major advantages for intraday buyers:
+            
+            **1. Spotting Pre-Breakout Accumulation**
+            *   **Context:** Spot Nifty is stuck in a narrow range.
+            *   **Signal:** The ATM IV Spread trends upward steadily over a 15–30 min period.
+            *   **Interpretation:** Institutions are quietly accumulating Calls ahead of a move. Buy ATM Calls before Delta and Vega expansion hit.
+
+            **2. Identifying "Fakeout" Breakouts**
+            *   **Context:** Nifty breaks above an intraday resistance level.
+            *   **Signal:** Call IV drops rapidly as spot pushes higher (IV Spread turns sharply negative).
+            *   **Interpretation:** Market makers are dumping Call inventory into retail buyers. The move lacks backing. Avoid Calls; prepare for mean-reversion.
+
+            **3. Trend Continuation Confirmation**
+            *   **Context:** Nifty is trending upward.
+            *   **Signal:** Call IV continues to rise alongside Spot Nifty (defying normal inverse volatility behavior).
+            *   **Interpretation:** High-conviction buying sweeps the asks. Hold long calls for larger multi-strike targets.
+        """)
+        st.markdown("""
+            <div class="summary-box" style="margin-top: 15px;">
+                <div class="summary-title" style="color: #FFA726;">Interpreting Intraday Signals (Summary Matrix)</div>
+                <table class="playbook-table">
+                    <thead>
+                        <tr>
+                            <th>Spot Nifty Action</th>
+                            <th>Relative Demand (IV Spread)</th>
+                            <th>What Is Happening Under the Hood</th>
+                            <th>Option Buyer Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Sideways Range</td>
+                            <td><span style="color:#00E676; font-weight:bold;">Surging Upward</span></td>
+                            <td>Stealth Call accumulation by funds</td>
+                            <td><span style="color:#00E676; font-weight:bold;">Buy ATM Calls</span> before the spot breakout</td>
+                        </tr>
+                        <tr>
+                            <td>Rallying High</td>
+                            <td><span style="color:#00E676; font-weight:bold;">Rising with Spot</span></td>
+                            <td>High-conviction buying sweeping asks</td>
+                            <td><span style="color:#00E676; font-weight:bold;">Hold Long Calls</span> (Ride the trend)</td>
+                        </tr>
+                        <tr>
+                            <td>Rallying High</td>
+                            <td><span style="color:#FF5252; font-weight:bold;">Falling Sharply</span></td>
+                            <td>Retail buying absorbed by MMs selling</td>
+                            <td><span style="color:#FF5252; font-weight:bold;">Avoid Calls</span> (High risk of sharp reversal)</td>
+                        </tr>
+                        <tr>
+                            <td>Sideways Range</td>
+                            <td><span style="color:#FF5252; font-weight:bold;">Plunging Downward</span></td>
+                            <td>Stealth Put accumulation / hedging</td>
+                            <td><span style="color:#FF5252; font-weight:bold;">Buy ATM Puts</span> before the spot breakdown</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        """, unsafe_allow_html=True)
+
+    # ================= ROW 12: DATA GRID =================
     st.markdown('<div class="chart-container"><div class="chart-title">Institutional Options Chain Grid</div>', unsafe_allow_html=True)
     grid_df = df_filtered[["Strike", "CE_LTP", "PE_LTP", "CE_OI", "PE_OI", "CE_Delta", "PE_Delta", "Net_Delta_OI", "Net_DEX", "Net_GEX", "Net_VEX", "Net_CHEX", "Net_SPEX", "CE_IV", "PE_IV", "IV_Spread"]].copy()
     st.dataframe(
