@@ -32,6 +32,7 @@ st.markdown(
         margin-bottom: 12px;
         border-top: 3px solid #3B4252;
         position: relative;
+        overflow: visible !important;
     }
     .metric-card-green { border-top: 3px solid #00E676; }
     .metric-card-red { border-top: 3px solid #FF5252; }
@@ -53,6 +54,7 @@ st.markdown(
         padding: 12px;
         margin-bottom: 16px;
         position: relative;
+        overflow: visible !important;
     }
     .chart-title {
         font-size: 0.85rem;
@@ -64,7 +66,7 @@ st.markdown(
         padding-bottom: 5px;
     }
 
-    /* Info Tooltip */
+    /* Fixed CSS-Based Tooltip */
     .info-tooltip {
         position: relative;
         display: inline-block;
@@ -73,6 +75,7 @@ st.markdown(
         float: right;
         margin-left: 5px;
         font-size: 0.9rem;
+        z-index: 999999;
     }
     .info-tooltip .tooltip-text {
         visibility: hidden;
@@ -83,8 +86,7 @@ st.markdown(
         border-radius: 6px;
         padding: 10px 14px;
         position: absolute;
-        z-index: 99999;
-        bottom: 130%; 
+        top: 140%; 
         right: -10px;
         opacity: 0;
         transition: opacity 0.2s;
@@ -93,6 +95,15 @@ st.markdown(
         font-weight: 500;
         box-shadow: 0px 4px 15px rgba(0,0,0,0.8);
         line-height: 1.4;
+    }
+    .info-tooltip .tooltip-text::after {
+        content: "";
+        position: absolute;
+        bottom: 100%;
+        right: 15px;
+        border-width: 6px;
+        border-style: solid;
+        border-color: transparent transparent #3B4252 transparent;
     }
     .info-tooltip:hover .tooltip-text { visibility: visible; opacity: 1; }
     .info-tooltip:hover { color: #FFFFFF; }
@@ -224,14 +235,23 @@ def fetch_multi_expiry_vol_structure(spot_price):
         expiries = [(today + datetime.timedelta(days=i)).strftime("%Y-%m-%d") for i in range(1, 45) if (today + datetime.timedelta(days=i)).weekday() == 3][:4]
     else: expiries = expiries[:4]
 
-    atm_strike = int(round(spot_price / 50) * 50)
     vol_data = []
 
     for idx, exp in enumerate(expiries):
         if idx > 0: time.sleep(1.2)
-        df_exp, _, _ = fetch_gex_option_chain(exp)
+        df_exp, exp_spot, _ = fetch_gex_option_chain(exp)
         if df_exp is not None and not df_exp.empty:
-            atm_row = df_exp[df_exp["Strike"] == atm_strike]
+            
+            # --- SYNTHETIC FUTURE BASED ATM CALCULATION PER EXPIRY ---
+            temp_spot_atm = int(round(exp_spot / 50) * 50)
+            temp_row = df_exp[df_exp["Strike"] == temp_spot_atm]
+            if not temp_row.empty:
+                exp_synth = temp_spot_atm + temp_row["CE_LTP"].values[0] - temp_row["PE_LTP"].values[0]
+            else:
+                exp_synth = exp_spot
+            exp_atm_strike = int(round(exp_synth / 50) * 50)
+            
+            atm_row = df_exp[df_exp["Strike"] == exp_atm_strike]
             ce_iv = atm_row["CE_IV"].values[0] if not atm_row.empty else df_exp["CE_IV"].mean()
             pe_iv = atm_row["PE_IV"].values[0] if not atm_row.empty else df_exp["PE_IV"].mean()
             mean_iv = (ce_iv + pe_iv) / 2.0
@@ -282,11 +302,23 @@ else:
 
 df_oc, spot_price, error_remark = fetch_gex_option_chain(selected_expiry)
 
+# --- GLOBAL SYNTHETIC FUTURE CALCULATION ---
+synthetic_future = spot_price
+if df_oc is not None and not df_oc.empty:
+    spot_atm = int(round(spot_price / 50) * 50)
+    spot_row = df_oc[df_oc["Strike"] == spot_atm]
+    if not spot_row.empty:
+        synthetic_future = spot_atm + spot_row["CE_LTP"].values[0] - spot_row["PE_LTP"].values[0]
+        
+# Calculate Global True ATM based on Synthetic Future
+atm_strike = int(round(synthetic_future / 50) * 50)
+strike_m50 = atm_strike - 50
+strike_p50 = atm_strike + 50
+
 selected_target_strike = None
 if df_oc is not None and not df_oc.empty:
-    atm_strike_val = int(round(spot_price / 50) * 50)
     all_strikes = df_oc["Strike"].tolist()
-    default_index = all_strikes.index(atm_strike_val) if atm_strike_val in all_strikes else 0
+    default_index = all_strikes.index(atm_strike) if atm_strike in all_strikes else 0
     selected_target_strike = st.sidebar.selectbox("🎯 Target Strike", all_strikes, index=default_index)
 
 # Data Memory DataFrames 
@@ -330,9 +362,6 @@ if st.sidebar.button("🗑️ Reset Session Cache"):
 if error_remark:
     st.error(f"⚠️ **Dhan Server Error:** {error_remark}")
 elif df_oc is not None and not df_oc.empty:
-    atm_strike = int(round(spot_price / 50) * 50)
-    strike_m50 = atm_strike - 50
-    strike_p50 = atm_strike + 50
     
     df_sorted = df_oc.sort_values("Strike").copy()
     df_sorted["Cum_Net_GEX"] = df_sorted["Net_GEX"].cumsum()
@@ -449,7 +478,6 @@ elif df_oc is not None and not df_oc.empty:
     doi_roc_1m = doi_df.iloc[-1]["Delta_OI_ROC_1m"] if not doi_df.empty else 0.0
     
     current_straddle = strad_df.iloc[-1]["Actual_Straddle"] if not strad_df.empty else 0.0
-    expected_straddle = strad_df.iloc[-1]["Expected_Straddle"] if not strad_df.empty else 0.0
     strad_regime = strad_df.iloc[-1]["Regime"] if not strad_df.empty else "NORMAL DECAY"
 
     row_m50, row_atm, row_p50 = df_oc[df_oc["Strike"] == strike_m50], df_oc[df_oc["Strike"] == atm_strike], df_oc[df_oc["Strike"] == strike_p50]
@@ -490,10 +518,10 @@ elif df_oc is not None and not df_oc.empty:
     with m1:
         st.markdown(f"""
             <div class="metric-card metric-card-amber">
-                <div class="info-tooltip">ⓘ<span class="tooltip-text">Current Spot Price of Nifty 50, tracked against the closest ATM option strike boundary.</span></div>
-                <div class="metric-title">NIFTY SPOT</div>
-                <div class="metric-value">₹{spot_price:,.2f}</div>
-                <div class="metric-sub sub-amber">ATM: {atm_strike}</div>
+                <div class="info-tooltip">ⓘ<span class="tooltip-text">Current Spot and calculated Synthetic Future (K + C - P) for the selected expiry. All chain analytics are actively centered on the Synthetic ATM Strike.</span></div>
+                <div class="metric-title">NIFTY SYNTH FUT</div>
+                <div class="metric-value">₹{synthetic_future:,.2f}</div>
+                <div class="metric-sub sub-amber">Spot: ₹{spot_price:,.2f} | ATM: {atm_strike}</div>
             </div>
         """, unsafe_allow_html=True)
 
@@ -606,26 +634,10 @@ elif df_oc is not None and not df_oc.empty:
         st.plotly_chart(fig_strad, use_container_width=True, key="chart_strad")
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # ================= ROW 4: MULTI-STRIKE SYNTHETIC PARITY ENGINE =================
-    st.markdown('<div class="chart-container"><div class="info-tooltip">ⓘ<span class="tooltip-text"><b>Multi-Strike Synthetic Parity Engine.</b><br>Tracks the implied spot price derived from options premiums (K + C - P). If Synthetics break out while Spot consolidates, it signals institutional stealth accumulation.</span></div><div class="chart-title">Multi-Strike Synthetic Parity Engine (ITM, ATM, OTM)</div>', unsafe_allow_html=True)
-    st.markdown(f"**Live Regime Signal:** <span style='color: {synth_flag_color};'>{synth_flag_text}</span>", unsafe_allow_html=True)
-    
-    fig_synth = go.Figure()
-    if not synth_df.empty:
-        fig_synth.add_trace(go.Scatter(x=synth_df["Time"], y=synth_df["Spot"], mode="lines", name="Nifty Spot", line=dict(color="#FFD700", width=2)))
-        fig_synth.add_trace(go.Scatter(x=synth_df["Time"], y=synth_df["Synth_M50"], mode="lines", name=f"ITM ({strike_m50})", line=dict(color="#00E676", width=1.5, dash="dot")))
-        fig_synth.add_trace(go.Scatter(x=synth_df["Time"], y=synth_df["Synth_ATM"], mode="lines", name=f"ATM ({atm_strike})", line=dict(color="#29B6F6", width=1.5, dash="dot")))
-        fig_synth.add_trace(go.Scatter(x=synth_df["Time"], y=synth_df["Synth_P50"], mode="lines", name=f"OTM ({strike_p50})", line=dict(color="#FF5252", width=1.5, dash="dot")))
+    # ================= ROW 4: EXPOSURE PROFILES (DEX & GEX) =================
+    r4_col1, r4_col2 = st.columns(2)
 
-    fig_synth.update_xaxes(range=["09:15:00", "15:30:00"], dtick="3600000", gridcolor="#2A2E39")
-    fig_synth.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", margin=dict(l=0, r=0, t=10, b=0), height=300, legend=dict(orientation="h", y=1.1))
-    st.plotly_chart(fig_synth, use_container_width=True, key="chart_synth")
-    st.markdown('</div>', unsafe_allow_html=True)
-
-    # ================= ROW 5: EXPOSURE PROFILES (DEX & Z-GEX) =================
-    r5_col1, r5_col2 = st.columns(2)
-
-    with r5_col1:
+    with r4_col1:
         st.markdown('<div class="chart-container"><div class="info-tooltip">ⓘ<span class="tooltip-text">Total Rupee Value of Delta per strike. Visualizes where directional bias is heavily concentrated and where dealer hedging flows are trapped. Includes the current Spot line.</span></div><div class="chart-title">Net Delta Exposure (DEX) By Strike</div>', unsafe_allow_html=True)
         fig_dex = go.Figure()
         colors_dex = ["#00E676" if val >= 0 else "#FF5252" for val in df_filtered["Net_DEX"]]
@@ -640,23 +652,7 @@ elif df_oc is not None and not df_oc.empty:
         st.plotly_chart(fig_dex, use_container_width=True, key="chart_dex")
         st.markdown('</div>', unsafe_allow_html=True)
 
-    with r5_col2:
-        st.markdown('<div class="chart-container"><div class="info-tooltip">ⓘ<span class="tooltip-text">Isolates structural regime shifts by comparing current GEX to its rolling mean. Watch for lines dipping below -2.0, which confirms a total regime collapse where dealers are forced to violently buy rips and sell dips.</span></div><div class="chart-title">Normalized Gamma Z-Score (ZGEX) Tracker</div>', unsafe_allow_html=True)
-        fig_zgex = go.Figure()
-        if not gex_df.empty:
-            fig_zgex.add_trace(go.Scatter(x=gex_df["Time"], y=gex_df["Z_GEX"], mode="lines", fill='tozeroy', line=dict(color="#AB47BC", width=2)))
-        fig_zgex.add_hline(y=1.0, line_dash="solid", line_color="#00E676", opacity=0.3)
-        fig_zgex.add_hline(y=-1.0, line_dash="solid", line_color="#00E676", opacity=0.3)
-        fig_zgex.add_hline(y=-2.0, line_dash="dash", line_color="#FF5252", annotation_text="Collapse", annotation_font=dict(color="#FF5252"))
-        fig_zgex.update_xaxes(range=["09:15:00", "15:30:00"], dtick="3600000", gridcolor="#2A2E39")
-        fig_zgex.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", margin=dict(l=0, r=0, t=10, b=0), height=250)
-        st.plotly_chart(fig_zgex, use_container_width=True, key="chart_zgex")
-        st.markdown('</div>', unsafe_allow_html=True)
-
-    # ================= ROW 6: NET GEX, VANNA, CHARM =================
-    r6_col1, r6_col2, r6_col3 = st.columns(3)
-
-    with r6_col1:
+    with r4_col2:
         st.markdown('<div class="chart-container"><div class="info-tooltip">ⓘ<span class="tooltip-text">Identifies Resistance (Call Walls - Red) and Support (Put Walls - Green). Yellow line marks the Spot Price, Blue dashed line marks the Gamma Flip Level (Zero-crossing).</span></div><div class="chart-title">Net GEX Profile</div>', unsafe_allow_html=True)
         fig_gex = go.Figure()
         colors_gex = ["#00E676" if g >= 0 else "#FF5252" for g in df_filtered["Net_GEX"]]
@@ -670,11 +666,46 @@ elif df_oc is not None and not df_oc.empty:
         fig_gex.add_annotation(x=gamma_flip_strike, y=0.85, yref="paper", text="Flip", showarrow=False, font=dict(color="#29B6F6", size=10), xanchor="left")
         
         fig_gex.update_xaxes(range=[atm_strike - 550, atm_strike + 550], tickmode='array', tickvals=df_filtered["Strike"], ticktext=strike_labels, tickangle=-45, gridcolor="#2A2E39")
-        fig_gex.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", margin=dict(l=0, r=0, t=10, b=0), height=240, showlegend=False)
+        fig_gex.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", margin=dict(l=0, r=0, t=10, b=0), height=250, showlegend=False)
         st.plotly_chart(fig_gex, use_container_width=True, key="chart_gex_profile")
         st.markdown('</div>', unsafe_allow_html=True)
 
-    with r6_col2:
+    # ================= ROW 5: Z-GEX & MULTI-STRIKE SYNTHETIC =================
+    r5_col1, r5_col2 = st.columns(2)
+    
+    with r5_col1:
+        st.markdown('<div class="chart-container"><div class="info-tooltip">ⓘ<span class="tooltip-text">Isolates structural regime shifts by comparing current GEX to its rolling mean. Watch for lines dipping below -2.0, which confirms a total regime collapse where dealers are forced to violently buy rips and sell dips.</span></div><div class="chart-title">Normalized Gamma Z-Score (ZGEX) Tracker</div>', unsafe_allow_html=True)
+        fig_zgex = go.Figure()
+        if not gex_df.empty:
+            fig_zgex.add_trace(go.Scatter(x=gex_df["Time"], y=gex_df["Z_GEX"], mode="lines", fill='tozeroy', line=dict(color="#AB47BC", width=2)))
+        fig_zgex.add_hline(y=1.0, line_dash="solid", line_color="#00E676", opacity=0.3)
+        fig_zgex.add_hline(y=-1.0, line_dash="solid", line_color="#00E676", opacity=0.3)
+        fig_zgex.add_hline(y=-2.0, line_dash="dash", line_color="#FF5252", annotation_text="Collapse", annotation_font=dict(color="#FF5252"))
+        fig_zgex.update_xaxes(range=["09:15:00", "15:30:00"], dtick="3600000", gridcolor="#2A2E39")
+        fig_zgex.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", margin=dict(l=0, r=0, t=10, b=0), height=300)
+        st.plotly_chart(fig_zgex, use_container_width=True, key="chart_zgex")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with r5_col2:
+        st.markdown('<div class="chart-container"><div class="info-tooltip">ⓘ<span class="tooltip-text"><b>Multi-Strike Synthetic Parity Engine.</b><br>Tracks the implied spot price derived from options premiums (K + C - P). If Synthetics break out while Spot consolidates, it signals institutional stealth accumulation.</span></div><div class="chart-title">Multi-Strike Synthetic Parity Engine (ITM, ATM, OTM)</div>', unsafe_allow_html=True)
+        st.markdown(f"**Live Regime Signal:** <span style='color: {synth_flag_color};'>{synth_flag_text}</span>", unsafe_allow_html=True)
+        
+        fig_synth = go.Figure()
+        if not synth_df.empty:
+            fig_synth.add_trace(go.Scatter(x=synth_df["Time"], y=synth_df["Spot"], mode="lines", name="Nifty Spot", line=dict(color="#FFD700", width=2)))
+            fig_synth.add_trace(go.Scatter(x=synth_df["Time"], y=synth_df["Synth_M50"], mode="lines", name=f"ITM ({strike_m50})", line=dict(color="#00E676", width=1.5, dash="dot")))
+            fig_synth.add_trace(go.Scatter(x=synth_df["Time"], y=synth_df["Synth_ATM"], mode="lines", name=f"ATM ({atm_strike})", line=dict(color="#29B6F6", width=1.5, dash="dot")))
+            fig_synth.add_trace(go.Scatter(x=synth_df["Time"], y=synth_df["Synth_P50"], mode="lines", name=f"OTM ({strike_p50})", line=dict(color="#FF5252", width=1.5, dash="dot")))
+
+        fig_synth.update_xaxes(range=["09:15:00", "15:30:00"], dtick="3600000", gridcolor="#2A2E39")
+        fig_synth.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", margin=dict(l=0, r=0, t=10, b=0), height=265, legend=dict(orientation="h", y=1.1))
+        st.plotly_chart(fig_synth, use_container_width=True, key="chart_synth")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    # ================= ROW 6: VANNA & CHARM =================
+    r6_col1, r6_col2 = st.columns(2)
+
+    with r6_col1:
         st.markdown('<div class="chart-container"><div class="info-tooltip">ⓘ<span class="tooltip-text">Sensitivity of Dealer Delta to changes in Implied Volatility. Strikes with massive Vanna peaks act as strong price magnets during high-volatility shifts or news events.</span></div><div class="chart-title">Vanna Exposure (VEX)</div>', unsafe_allow_html=True)
         fig_vex = go.Figure()
         fig_vex.add_trace(go.Scatter(x=df_filtered["Strike"], y=df_filtered["Net_VEX"], mode="lines+markers", line=dict(color="#FFA726", width=2)))
@@ -683,7 +714,7 @@ elif df_oc is not None and not df_oc.empty:
         st.plotly_chart(fig_vex, use_container_width=True, key="chart_vex")
         st.markdown('</div>', unsafe_allow_html=True)
 
-    with r6_col3:
+    with r6_col2:
         st.markdown('<div class="chart-container"><div class="info-tooltip">ⓘ<span class="tooltip-text">Dealer Delta adjustments driven entirely by the passage of time (Theta bleed). CHEX dictates where dealers must buy/sell to remain hedged as the clock approaches 3:30 PM.</span></div><div class="chart-title">Charm Exposure (CHEX)</div>', unsafe_allow_html=True)
         fig_chex = go.Figure()
         fig_chex.add_trace(go.Scatter(x=df_filtered["Strike"], y=df_filtered["Net_CHEX"], mode="lines+markers", line=dict(color="#AB47BC", width=2)))
