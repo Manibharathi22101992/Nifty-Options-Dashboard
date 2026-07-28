@@ -183,30 +183,38 @@ def start_dhan_websocket(client_id, access_token):
     }
 
     if not DHAN_WS_AVAILABLE:
-        ws_data["ERROR"] = "dhanhq not installed in requirements.txt"
+        ws_data["ERROR"] = "dhanhq not installed"
         return ws_data
 
     # IMPORTANT: Update this Nifty Futures ID when the monthly contract expires
     CURRENT_NIFTY_FUT_ID = "58756" 
     
-    instruments = {
-        marketfeed.NSE: ["2885", "1333", "4963"], # Reliance, HDFC, ICICI
-        marketfeed.FNO: [CURRENT_NIFTY_FUT_ID]
-    }
+    # Explicitly using integer codes to avoid AttributeError across different dhanhq versions
+    # 1 = NSE Equity, 2 = NSE FNO
+    instruments = [
+        (1, "2885"),  # Reliance
+        (1, "1333"),  # HDFC Bank
+        (1, "4963"),  # ICICI Bank
+        (2, CURRENT_NIFTY_FUT_ID)
+    ]
+
+    # Fetch correct Ticker constant or fallback to 15 (which is the default Ticker code)
+    sub_code = getattr(marketfeed, 'Ticker', 15)
 
     def on_connect(instance): ws_data["CONNECTED"] = True
     def on_disconnect(instance): ws_data["CONNECTED"] = False
 
     def on_message(instance, message):
-        if 'security_id' not in message or 'LTP' not in message: return
-        sec_id = str(message['security_id'])
-        ltp = float(message['LTP'])
-        ltq = float(message.get('last_trade_quantity', 0))
-        
-        if sec_id == "2885": update_cvd("RELIANCE", ltp, ltq)
-        elif sec_id == "1333": update_cvd("HDFCBANK", ltp, ltq)
-        elif sec_id == "4963": update_cvd("ICICIBANK", ltp, ltq)
-        elif sec_id == CURRENT_NIFTY_FUT_ID: ws_data["NIFTY_FUT_LTP"] = ltp
+        if isinstance(message, dict):
+            sec_id = str(message.get('security_id', ''))
+            ltp = float(message.get('LTP', 0.0))
+            ltq = float(message.get('last_trade_quantity', 0.0))
+            
+            if ltp > 0:
+                if sec_id == "2885": update_cvd("RELIANCE", ltp, ltq)
+                elif sec_id == "1333": update_cvd("HDFCBANK", ltp, ltq)
+                elif sec_id == "4963": update_cvd("ICICIBANK", ltp, ltq)
+                elif sec_id == CURRENT_NIFTY_FUT_ID: ws_data["NIFTY_FUT_LTP"] = ltp
 
     def update_cvd(symbol, ltp, ltq):
         prev_ltp = ws_data[f"{symbol}_PREV"]
@@ -218,7 +226,14 @@ def start_dhan_websocket(client_id, access_token):
 
     def run_ws():
         try:
-            feed = marketfeed.DhanFeed(client_id, access_token, instruments, subscription_code=marketfeed.Ticker, on_connect=on_connect, on_message=on_message, on_close=on_disconnect)
+            feed = marketfeed.DhanFeed(
+                client_id, 
+                access_token, 
+                instruments, 
+                sub_code, 
+                on_connect=on_connect, 
+                on_message=on_message
+            )
             feed.run_forever()
         except Exception: pass
 
