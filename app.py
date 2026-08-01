@@ -133,7 +133,7 @@ st.markdown(
         color: #8A93A6; font-weight: 600; font-size: 0.9rem;
     }
     div[data-testid="stTabs"] button[aria-selected="true"] {
-        color: #29B6F6; border-bottom-color: #29B6F6;
+        color: #00E676; border-bottom-color: #00E676;
     }
     </style>
     """,
@@ -166,16 +166,19 @@ def apply_dark_layout(fig, height=250):
     fig.update_yaxes(gridcolor="#2A2E39", zerolinecolor="#2A2E39", tickfont=dict(size=10))
     return fig
 
-def create_h_bar(title, put_val, call_val):
-    """Creates horizontal comparative bars matching OpenBull aesthetics"""
+def create_h_bar(title, put_val, call_val, interp_text="", interp_color="#8A93A6"):
+    """Creates horizontal comparative bars matching Put=Red, Call=Green standards with sentiment badges"""
     fig = go.Figure()
-    fig.add_trace(go.Bar(x=[put_val], y=[''], name='Put', orientation='h', marker_color="#29B6F6", text=f"{put_val:,.0f}", textposition='inside', insidetextanchor='end'))
-    fig.add_trace(go.Bar(x=[call_val], y=[''], name='Call', orientation='h', marker_color="#FF5252", text=f"{call_val:,.0f}", textposition='inside', insidetextanchor='start'))
+    fig.add_trace(go.Bar(x=[put_val], y=[''], name='Put (PE)', orientation='h', marker_color="#FF5252", text=f"{put_val:,.0f}", textposition='inside', insidetextanchor='end'))
+    fig.add_trace(go.Bar(x=[call_val], y=[''], name='Call (CE)', orientation='h', marker_color="#00E676", text=f"{call_val:,.0f}", textposition='inside', insidetextanchor='start'))
     fig.update_layout(
-        title=dict(text=title, font=dict(size=11, color="#8A93A6"), x=0.5, xanchor='center'),
+        title=dict(
+            text=f"<b>{title}</b><br><span style='color:{interp_color}; font-size:10px; font-weight:700;'>{interp_text}</span>",
+            font=dict(size=11, color="#8A93A6"), x=0.5, xanchor='center'
+        ),
         barmode='group',
-        margin=dict(l=0, r=0, t=25, b=0),
-        height=75,
+        margin=dict(l=0, r=0, t=35, b=0),
+        height=85,
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
         showlegend=False,
         xaxis=dict(visible=False), yaxis=dict(visible=False),
@@ -202,9 +205,7 @@ def save_persisted_df(df, name):
 def check_and_reset(df_name, cols, today_date_str, now_time_str):
     df = get_persisted_df(df_name, cols)
     if not df.empty:
-        last_date = df.iloc[-1]["Date"]
-        # Retain yesterday's data UNTIL 09:15 AM today
-        if last_date != today_date_str and now_time_str >= "09:15:00":
+        if df.iloc[-1]["Date"] != today_date_str and now_time_str >= "09:15:00":
             df = pd.DataFrame(columns=cols)
             save_persisted_df(df, df_name)
     return df
@@ -371,13 +372,16 @@ def fetch_multi_expiry_vol_structure(spot_price):
 # 6. SESSION & LIVE ENGINE INITIALIZATION
 # ---------------------------------------------------------
 st.sidebar.header("⚙️ Command Center")
-auto_refresh = st.sidebar.checkbox("Live Auto-Refresh (5s)", value=True)
-if auto_refresh: st_autorefresh(interval=5000, key="datarefresh")
 
 now_ist = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5, minutes=30)))
 today_date_str, now_time_str = now_ist.strftime("%Y-%m-%d"), now_ist.strftime("%H:%M:%S")
 m_open, m_close = now_ist.replace(hour=9, minute=15, second=0, microsecond=0), now_ist.replace(hour=15, minute=30, second=0, microsecond=0)
 is_market_live = now_ist.weekday() < 5 and (m_open <= now_ist <= m_close)
+
+# AUTO REFRESH ONLY DURING LIVE MARKET HOURS
+auto_refresh = st.sidebar.checkbox("Live Auto-Refresh (5s)", value=True)
+if auto_refresh and is_market_live:
+    st_autorefresh(interval=5000, key="datarefresh")
 
 try: valid_expiries = requests.post("https://api.dhan.co/v2/optionchain/expirylist", headers={"client-id": CLIENT_ID, "access-token": ACCESS_TOKEN, "Content-Type": "application/json"}, json={"UnderlyingScrip": 13, "UnderlyingSeg": "IDX_I"}, timeout=5).json().get("data", [])
 except: valid_expiries = []
@@ -396,11 +400,11 @@ strike_m50, strike_p50 = atm_strike - 50, atm_strike + 50
 
 selected_target_strike = st.sidebar.selectbox("🎯 Target Strike", df_oc["Strike"].tolist() if df_oc is not None else [], index=df_oc["Strike"].tolist().index(atm_strike) if df_oc is not None and atm_strike in df_oc["Strike"].tolist() else 0)
 
-# Init Memory
+# Init Memory DataFrames
 for key, cols in [
     ("iv_spread_history", ["Date", "Time", "Strike", "CE_IV", "PE_IV", "IV_Spread", "Spot"]),
     ("pcr_history", ["Date", "Timestamp_dt", "Time", "PCR", "Vol_PCR", "Delta_PCR_5m", "Delta_PCR_15m", "Total_CE_OI", "Total_PE_OI"]),
-    ("gex_history", ["Date", "Timestamp_dt", "Time", "Total_Net_GEX", "Z_GEX", "Flip_Strike", "Spot"]),
+    ("gex_history", ["Date", "Timestamp_dt", "Time", "Total_Net_GEX", "Z_GEX", "Flip_Strike", "Spot", "Max_Pain"]),
     ("synth_history", ["Date", "Time", "Spot", "Strike_M50", "Strike_ATM", "Strike_P50", "Synth_M50", "Synth_ATM", "Synth_P50", "PCP_Dev_Mean"]),
     ("delta_oi_history", ["Date", "Timestamp_dt", "Time", "Total_Net_Delta_OI", "Delta_OI_ROC_1m", "Total_Net_DEX", "DEX_Vel_5m"]),
     ("straddle_history", ["Date", "Time", "Elapsed_Mins", "Actual_Straddle", "Expected_Straddle", "Regime"])
@@ -473,7 +477,7 @@ elif df_oc is not None and not df_oc.empty:
         gex_df = st.session_state["gex_history"]
         if gex_df.empty or gex_df.iloc[-1]["Time"] != now_time_str:
             z_gex = (df_oc["Net_GEX"].sum() - gex_df["Total_Net_GEX"].tail(20).mean()) / gex_df["Total_Net_GEX"].tail(20).std() if len(gex_df) >= 2 and gex_df["Total_Net_GEX"].tail(20).std() > 0 else 0.0
-            st.session_state["gex_history"] = pd.concat([gex_df, pd.DataFrame([{"Date": today_date_str, "Timestamp_dt": now_ist, "Time": now_time_str, "Total_Net_GEX": df_oc["Net_GEX"].sum(), "Z_GEX": z_gex, "Flip_Strike": gamma_flip_strike, "Spot": spot_price}])], ignore_index=True)
+            st.session_state["gex_history"] = pd.concat([gex_df, pd.DataFrame([{"Date": today_date_str, "Timestamp_dt": now_ist, "Time": now_time_str, "Total_Net_GEX": df_oc["Net_GEX"].sum(), "Z_GEX": z_gex, "Flip_Strike": gamma_flip_strike, "Spot": spot_price, "Max_Pain": max_pain_strike}])], ignore_index=True)
             save_persisted_df(st.session_state["gex_history"], "gex_history")
 
         synth_df = st.session_state["synth_history"]
@@ -564,18 +568,43 @@ elif df_oc is not None and not df_oc.empty:
     m3.markdown(f'<div class="metric-card {"metric-card-green" if dp_15m >= 0.15 else ("metric-card-red" if dp_15m <= -0.15 else "metric-card-amber")}"><div class="metric-title">ΔPCR 15M VELOCITY</div><div class="metric-value">{dp_15m:+.2f}</div><div class="metric-sub {"sub-green" if dp_15m >= 0.15 else ("sub-red" if dp_15m <= -0.15 else "sub-amber")}">PCR: {pcr_df.iloc[-1]["PCR"] if not pcr_df.empty else 0:.2f}</div></div>', unsafe_allow_html=True)
     m4.markdown(f'<div class="metric-card {"metric-card-green" if df_oc["Net_Delta_OI"].sum() >= 0 else "metric-card-red"}"><div class="metric-title">NET DELTA OI</div><div class="metric-value">{df_oc["Net_Delta_OI"].sum():+,.0f}</div><div class="metric-sub {"sub-green" if (doi_df.iloc[-1]["Delta_OI_ROC_1m"] if not doi_df.empty else 0) >= 0 else "sub-red"}">1m ROC: {doi_df.iloc[-1]["Delta_OI_ROC_1m"] if not doi_df.empty else 0:+,.0f}</div></div>', unsafe_allow_html=True)
     m5.markdown(f'<div class="metric-card {"metric-card-green" if (strad_df.iloc[-1]["Regime"] if not strad_df.empty else "") == "VOL COIL 🟢" else "metric-card-amber"}"><div class="metric-title">STRADDLE DECAY</div><div class="metric-value">₹{strad_df.iloc[-1]["Actual_Straddle"] if not strad_df.empty else 0:.1f}</div><div class="metric-sub {"sub-green" if (strad_df.iloc[-1]["Regime"] if not strad_df.empty else "") == "VOL COIL 🟢" else "sub-amber"}">{strad_df.iloc[-1]["Regime"] if not strad_df.empty else "NORMAL"}</div></div>', unsafe_allow_html=True)
-    z_col = "metric-card-red" if cz_gex < -2.0 else ("metric-card-green" if -1.0 <= cz_gex <= 1.0 else "metric-card-amber")
     m6.markdown(f'<div class="metric-card {z_col}"><div class="metric-title">Z-GEX SCORE</div><div class="metric-value">{cz_gex:+.2f}</div><div class="metric-sub {"sub-red" if cz_gex < -2.0 else ("sub-green" if -1.0 <= cz_gex <= 1.0 else "sub-amber")}">{"GAMMA COLLAPSE" if cz_gex < -2.0 else ("NORMAL DAMPENING" if -1.0 <= cz_gex <= 1.0 else "TRANSITION ZONE")}</div></div>', unsafe_allow_html=True)
 
-    # --- HORIZONTAL AGGREGATE METRICS (IMAGE REPLICA) ---
-    st.markdown('<div class="chart-title" style="margin-top:10px;">Aggregate Options Flow (Total Call vs Put)</div>', unsafe_allow_html=True)
+    # --- HORIZONTAL AGGREGATE METRICS WITH DYNAMIC SENTIMENT INTERPRETATIONS ---
+    st.markdown('<div class="chart-title" style="margin-top:10px;">Aggregate Options Flow (Total PE vs CE)</div>', unsafe_allow_html=True)
+    
+    # Calculate Aggregate Balances and Sentiment Tags
+    tot_pe_oi, tot_ce_oi = df_filtered["PE_OI"].sum(), df_filtered["CE_OI"].sum()
+    oi_interp = "🟢 Uptrend / Strong Support" if tot_pe_oi > tot_ce_oi * 1.15 else ("🔴 Downtrend / Resistance" if tot_ce_oi > tot_pe_oi * 1.15 else "⚪ Balanced Structure")
+    oi_col = "#00E676" if "Uptrend" in oi_interp else ("#FF5252" if "Downtrend" in oi_interp else "#8A93A6")
+
+    tot_pe_oichg, tot_ce_oichg = df_filtered["PE_OI_Chg"].sum(), df_filtered["CE_OI_Chg"].sum()
+    chg_interp = "🟢 Bullish Momentum" if tot_pe_oichg > tot_ce_oichg * 1.2 else ("🔴 Bearish Pressure" if tot_ce_oichg > tot_pe_oichg * 1.2 else "⚪ Neutral Building")
+    chg_col = "#00E676" if "Bullish" in chg_interp else ("#FF5252" if "Bearish" in chg_interp else "#8A93A6")
+
+    tot_pe_vol, tot_ce_vol = df_filtered["PE_Vol"].sum(), df_filtered["CE_Vol"].sum()
+    vol_interp = "🟢 Bullish Call Sweeps" if tot_ce_vol > tot_pe_vol * 1.15 else ("🔴 Bearish Put Sweeps" if tot_pe_vol > tot_ce_vol * 1.15 else "⚪ Even Turnover")
+    vol_col = "#00E676" if "Bullish" in vol_interp else ("#FF5252" if "Bearish" in vol_interp else "#8A93A6")
+
+    tot_pe_chex, tot_ce_chex = df_filtered["PE_CHEX"].sum(), df_filtered["CE_CHEX"].sum()
+    chex_interp = "🟢 Time Decay Bullish" if tot_pe_chex > tot_ce_chex else "🔴 Time Bleed Bearish"
+    chex_col = "#00E676" if tot_pe_chex > tot_ce_chex else "#FF5252"
+
+    tot_pe_vex, tot_ce_vex = df_filtered["PE_VEX"].sum(), df_filtered["CE_VEX"].sum()
+    vex_interp = "🟢 Vol Squeeze Risk" if tot_pe_vex > tot_ce_vex else "🔴 Vol Crush Expected"
+    vex_col = "#00E676" if tot_pe_vex > tot_ce_vex else "#FF5252"
+
+    tot_put_gex, tot_call_gex = abs(df_filtered["Put_GEX"].sum()), df_filtered["Call_GEX"].sum()
+    gex_interp = "⚪ Sideways / Pinning" if tot_call_gex > tot_put_gex * 1.3 else ("🔴 Trend Acceleration" if tot_put_gex > tot_call_gex else "🟢 Stable Bounds")
+    gex_col = "#FFD700" if "Sideways" in gex_interp else ("#FF5252" if "Acceleration" in gex_interp else "#00E676")
+
     h1, h2, h3, h4, h5, h6 = st.columns(6)
-    h1.plotly_chart(create_h_bar("Total OI", df_filtered["PE_OI"].sum(), df_filtered["CE_OI"].sum()), use_container_width=True)
-    h2.plotly_chart(create_h_bar("OI Change", df_filtered["PE_OI_Chg"].sum(), df_filtered["CE_OI_Chg"].sum()), use_container_width=True)
-    h3.plotly_chart(create_h_bar("Volume", df_filtered["PE_Vol"].sum(), df_filtered["CE_Vol"].sum()), use_container_width=True)
-    h4.plotly_chart(create_h_bar("Theta Exp (CHEX)", df_filtered["PE_CHEX"].sum(), df_filtered["CE_CHEX"].sum()), use_container_width=True)
-    h5.plotly_chart(create_h_bar("Vega Exp (VEX)", df_filtered["PE_VEX"].sum(), df_filtered["CE_VEX"].sum()), use_container_width=True)
-    h6.plotly_chart(create_h_bar("Gamma Exp (GEX)", abs(df_filtered["Put_GEX"].sum()), df_filtered["Call_GEX"].sum()), use_container_width=True)
+    h1.plotly_chart(create_h_bar("Total OI", tot_pe_oi, tot_ce_oi, oi_interp, oi_col), use_container_width=True)
+    h2.plotly_chart(create_h_bar("OI Change", tot_pe_oichg, tot_ce_oichg, chg_interp, chg_col), use_container_width=True)
+    h3.plotly_chart(create_h_bar("Volume", tot_pe_vol, tot_ce_vol, vol_interp, vol_col), use_container_width=True)
+    h4.plotly_chart(create_h_bar("Theta Exp (CHEX)", tot_pe_chex, tot_ce_chex, chex_interp, chex_col), use_container_width=True)
+    h5.plotly_chart(create_h_bar("Vega Exp (VEX)", tot_pe_vex, tot_ce_vex, vex_interp, vex_col), use_container_width=True)
+    h6.plotly_chart(create_h_bar("Gamma Exp (GEX)", tot_put_gex, tot_call_gex, gex_interp, gex_col), use_container_width=True)
 
 
     # 8C. TABBED INTERFACE
@@ -587,7 +616,7 @@ elif df_oc is not None and not df_oc.empty:
         "📊 Options Chain Grid"
     ])
 
-    with tab1: # INTRA DAY FLOW
+    with tab1: # INTRADAY FLOW
         r1c1, r1c2 = st.columns(2)
         with r1c1:
             st.markdown(f'<div class="chart-container"><div class="chart-title">Intraday IV Spread Movement ({selected_target_strike})</div>', unsafe_allow_html=True)
@@ -611,8 +640,8 @@ elif df_oc is not None and not df_oc.empty:
             st.markdown('<div class="chart-container"><div class="chart-title">OpenBull Cumulative OI Trend (Cr)</div>', unsafe_allow_html=True)
             fig_oi_trend = go.Figure()
             if not pcr_df.empty:
-                fig_oi_trend.add_trace(go.Scatter(x=pcr_df["Time"], y=pcr_df["Total_PE_OI"]/1e7, mode="lines", name="Put OI", line=dict(color="#29B6F6", width=2)))
-                fig_oi_trend.add_trace(go.Scatter(x=pcr_df["Time"], y=pcr_df["Total_CE_OI"]/1e7, mode="lines", name="Call OI", line=dict(color="#FF5252", width=2)))
+                fig_oi_trend.add_trace(go.Scatter(x=pcr_df["Time"], y=pcr_df["Total_PE_OI"]/1e7, mode="lines", name="Put OI (PE)", line=dict(color="#FF5252", width=2)))
+                fig_oi_trend.add_trace(go.Scatter(x=pcr_df["Time"], y=pcr_df["Total_CE_OI"]/1e7, mode="lines", name="Call OI (CE)", line=dict(color="#00E676", width=2)))
                 fig_oi_trend.add_trace(go.Scatter(x=pcr_df["Time"], y=(pcr_df["Total_PE_OI"]-pcr_df["Total_CE_OI"])/1e7, mode="lines", name="PE-CE Diff", line=dict(color="#AB47BC", width=2)))
             st.plotly_chart(apply_dark_layout(fig_oi_trend), use_container_width=True, key="c_oit")
             st.markdown('</div>', unsafe_allow_html=True)
@@ -646,8 +675,8 @@ elif df_oc is not None and not df_oc.empty:
         with oi_col1:
             st.markdown('<div class="chart-container"><div class="chart-title">OI Tracker (CE/PE Profile)</div>', unsafe_allow_html=True)
             fig_oi_prof = go.Figure()
-            fig_oi_prof.add_trace(go.Bar(x=df_filtered["Strike"], y=df_filtered["PE_OI"], name="Put OI", marker_color="#29B6F6"))
-            fig_oi_prof.add_trace(go.Bar(x=df_filtered["Strike"], y=df_filtered["CE_OI"], name="Call OI", marker_color="#FF5252"))
+            fig_oi_prof.add_trace(go.Bar(x=df_filtered["Strike"], y=df_filtered["PE_OI"], name="Put OI (PE)", marker_color="#FF5252"))
+            fig_oi_prof.add_trace(go.Bar(x=df_filtered["Strike"], y=df_filtered["CE_OI"], name="Call OI (CE)", marker_color="#00E676"))
             fig_oi_prof.add_vline(x=spot_price, line_dash="solid", line_color="#FFD700")
             fig_oi_prof.update_xaxes(tickmode='array', tickvals=df_filtered["Strike"], ticktext=strike_labels)
             fig_oi_prof.update_layout(barmode='group')
@@ -656,8 +685,8 @@ elif df_oc is not None and not df_oc.empty:
         with oi_col2:
             st.markdown('<div class="chart-container"><div class="chart-title">OI Change Tracker (CE/PE Profile)</div>', unsafe_allow_html=True)
             fig_oichg_prof = go.Figure()
-            fig_oichg_prof.add_trace(go.Bar(x=df_filtered["Strike"], y=df_filtered["PE_OI_Chg"], name="Put OI Chg", marker_color="#29B6F6"))
-            fig_oichg_prof.add_trace(go.Bar(x=df_filtered["Strike"], y=df_filtered["CE_OI_Chg"], name="Call OI Chg", marker_color="#FF5252"))
+            fig_oichg_prof.add_trace(go.Bar(x=df_filtered["Strike"], y=df_filtered["PE_OI_Chg"], name="Put OI Chg", marker_color="#FF5252"))
+            fig_oichg_prof.add_trace(go.Bar(x=df_filtered["Strike"], y=df_filtered["CE_OI_Chg"], name="Call OI Chg", marker_color="#00E676"))
             fig_oichg_prof.add_vline(x=spot_price, line_dash="solid", line_color="#FFD700")
             fig_oichg_prof.update_xaxes(tickmode='array', tickvals=df_filtered["Strike"], ticktext=strike_labels)
             fig_oichg_prof.update_layout(barmode='group')
@@ -685,8 +714,9 @@ elif df_oc is not None and not df_oc.empty:
             y_max_gex = max(df_filtered["ABS_GEX"].max() if not df_filtered.empty else 1, df_filtered["Net_GEX"].max() if not df_filtered.empty else 1) * 1.1
             fig_gex.add_vline(x=spot_price, line_dash="solid", line_color="#FFD700"); fig_gex.add_annotation(x=spot_price, y=y_max_gex*0.95, text=f"Spot: {spot_price:.1f}", showarrow=False, font=dict(color="#FFD700", size=9))
             fig_gex.add_vline(x=gamma_flip_strike, line_dash="dash", line_color="#29B6F6"); fig_gex.add_annotation(x=gamma_flip_strike, y=y_max_gex*0.85, text=f"Flip: {gamma_flip_strike}", showarrow=False, font=dict(color="#29B6F6", size=9))
-            fig_gex.add_vline(x=call_wall_gex, line_dash="dash", line_color="#00E676"); fig_gex.add_annotation(x=call_wall_gex, y=y_max_gex*0.75, text=f"Call Wall: {call_wall_gex}", showarrow=False, font=dict(color="#00E676", size=9))
-            fig_gex.add_vline(x=put_wall_gex, line_dash="dash", line_color="#FF5252"); fig_gex.add_annotation(x=put_wall_gex, y=y_max_gex*0.65, text=f"Put Wall: {put_wall_gex}", showarrow=False, font=dict(color="#FF5252", size=9))
+            fig_gex.add_vline(x=max_pain_strike, line_dash="dash", line_color="#FFD700"); fig_gex.add_annotation(x=max_pain_strike, y=y_max_gex*0.75, text=f"Max Pain: {max_pain_strike}", showarrow=False, font=dict(color="#FFD700", size=9))
+            fig_gex.add_vline(x=call_wall_gex, line_dash="dash", line_color="#00E676"); fig_gex.add_annotation(x=call_wall_gex, y=y_max_gex*0.65, text=f"Call Wall: {call_wall_gex}", showarrow=False, font=dict(color="#00E676", size=9))
+            fig_gex.add_vline(x=put_wall_gex, line_dash="dash", line_color="#FF5252"); fig_gex.add_annotation(x=put_wall_gex, y=y_max_gex*0.55, text=f"Put Wall: {put_wall_gex}", showarrow=False, font=dict(color="#FF5252", size=9))
             fig_gex.update_xaxes(tickmode='array', tickvals=df_filtered["Strike"], ticktext=strike_labels, tickangle=-45)
             st.plotly_chart(apply_dark_layout(fig_gex, 350), use_container_width=True, key="c_gex")
             st.markdown('</div>', unsafe_allow_html=True)
@@ -730,6 +760,15 @@ elif df_oc is not None and not df_oc.empty:
 
         a3, a4 = st.columns(2)
         with a3:
+            st.markdown('<div class="chart-container"><div class="chart-title">Intraday Max Pain Migration (ΔMax Pain)</div>', unsafe_allow_html=True)
+            fig_pain_mig = go.Figure()
+            if not gex_df.empty:
+                fig_pain_mig.add_trace(go.Scatter(x=gex_df["Time"], y=gex_df["Spot"], mode="lines", name="Spot", line=dict(color="#FFD700", width=2)))
+                if "Max_Pain" in gex_df.columns:
+                    fig_pain_mig.add_trace(go.Scatter(x=gex_df["Time"], y=gex_df["Max_Pain"], mode="lines", name="Max Pain Level", line=dict(color="#FFD700", width=2, dash="dash")))
+            st.plotly_chart(apply_dark_layout(fig_pain_mig), use_container_width=True, key="c_painm")
+            st.markdown('</div>', unsafe_allow_html=True)
+        with a4:
             st.markdown('<div class="chart-container"><div class="chart-title">Put-Call Parity Discrepancy Index (PCP_Dev)</div>', unsafe_allow_html=True)
             fig_pcp = go.Figure()
             if not synth_df.empty:
@@ -738,16 +777,16 @@ elif df_oc is not None and not df_oc.empty:
             fig_pcp.add_hline(y=-3.0, line_dash="dash", line_color="#FF5252", annotation_text="-3.0 Put Squeeze")
             st.plotly_chart(apply_dark_layout(fig_pcp), use_container_width=True, key="c_pcp")
             st.markdown('</div>', unsafe_allow_html=True)
-        with a4:
-            st.markdown('<div class="chart-container"><div class="chart-title">Multi-Strike Synthetic Parity Engine</div>', unsafe_allow_html=True)
-            fig_synth = go.Figure()
-            if not synth_df.empty:
-                fig_synth.add_trace(go.Scatter(x=synth_df["Time"], y=synth_df["Spot"], mode="lines", name="Spot", line=dict(color="#FFD700", width=2)))
-                fig_synth.add_trace(go.Scatter(x=synth_df["Time"], y=synth_df["Synth_M50"], mode="lines", name="ITM Synth", line=dict(color="#00E676", width=1.5, dash="dot")))
-                fig_synth.add_trace(go.Scatter(x=synth_df["Time"], y=synth_df["Synth_ATM"], mode="lines", name="ATM Synth", line=dict(color="#29B6F6", width=1.5, dash="dot")))
-                fig_synth.add_trace(go.Scatter(x=synth_df["Time"], y=synth_df["Synth_P50"], mode="lines", name="OTM Synth", line=dict(color="#FF5252", width=1.5, dash="dot")))
-            st.plotly_chart(apply_dark_layout(fig_synth), use_container_width=True, key="c_synth")
-            st.markdown('</div>', unsafe_allow_html=True)
+
+        st.markdown('<div class="chart-container"><div class="chart-title">Multi-Strike Synthetic Parity Engine</div>', unsafe_allow_html=True)
+        fig_synth = go.Figure()
+        if not synth_df.empty:
+            fig_synth.add_trace(go.Scatter(x=synth_df["Time"], y=synth_df["Spot"], mode="lines", name="Spot", line=dict(color="#FFD700", width=2)))
+            fig_synth.add_trace(go.Scatter(x=synth_df["Time"], y=synth_df["Synth_M50"], mode="lines", name="ITM Synth", line=dict(color="#00E676", width=1.5, dash="dot")))
+            fig_synth.add_trace(go.Scatter(x=synth_df["Time"], y=synth_df["Synth_ATM"], mode="lines", name="ATM Synth", line=dict(color="#29B6F6", width=1.5, dash="dot")))
+            fig_synth.add_trace(go.Scatter(x=synth_df["Time"], y=synth_df["Synth_P50"], mode="lines", name="OTM Synth", line=dict(color="#FF5252", width=1.5, dash="dot")))
+        st.plotly_chart(apply_dark_layout(fig_synth), use_container_width=True, key="c_synth")
+        st.markdown('</div>', unsafe_allow_html=True)
 
         st.markdown('<div class="chart-container"><div class="chart-title">Futures Basis & Heavyweight CVD Filter (Live WebSocket)</div>', unsafe_allow_html=True)
         c_hw1, c_hw2, c_hw3, c_hw4 = st.columns(4)
@@ -763,8 +802,8 @@ elif df_oc is not None and not df_oc.empty:
         with v1:
             st.markdown('<div class="chart-container"><div class="chart-title">OpenBull IV Smile (Volatility Skew Profile)</div>', unsafe_allow_html=True)
             fig_smile = go.Figure()
-            fig_smile.add_trace(go.Scatter(x=df_filtered["Strike"], y=df_filtered["PE_IV"], mode="lines+markers", name="Put IV", line=dict(color="#29B6F6", width=2)))
-            fig_smile.add_trace(go.Scatter(x=df_filtered["Strike"], y=df_filtered["CE_IV"], mode="lines+markers", name="Call IV", line=dict(color="#FF5252", width=2)))
+            fig_smile.add_trace(go.Scatter(x=df_filtered["Strike"], y=df_filtered["PE_IV"], mode="lines+markers", name="Put IV (PE)", line=dict(color="#FF5252", width=2)))
+            fig_smile.add_trace(go.Scatter(x=df_filtered["Strike"], y=df_filtered["CE_IV"], mode="lines+markers", name="Call IV (CE)", line=dict(color="#00E676", width=2)))
             fig_smile.add_vline(x=spot_price, line_dash="solid", line_color="#FFD700")
             fig_smile.update_xaxes(tickmode='array', tickvals=df_filtered["Strike"], ticktext=strike_labels)
             st.plotly_chart(apply_dark_layout(fig_smile), use_container_width=True, key="c_smile")
@@ -775,7 +814,7 @@ elif df_oc is not None and not df_oc.empty:
             if not df_pain.empty:
                 fig_pain.add_trace(go.Bar(x=df_pain["Strike"], y=df_pain["Writer_Loss"], marker_color="#8A93A6", name="Writer Loss"))
                 fig_pain.add_vline(x=spot_price, line_dash="solid", line_color="#FFD700")
-                fig_pain.add_vline(x=max_pain_strike, line_dash="dash", line_color="#29B6F6", annotation_text=f"Max Pain: {max_pain_strike}")
+                fig_pain.add_vline(x=max_pain_strike, line_dash="dash", line_color="#FFD700", annotation_text=f"Max Pain: {max_pain_strike}")
             fig_pain.update_xaxes(tickmode='array', tickvals=df_filtered["Strike"], ticktext=strike_labels)
             st.plotly_chart(apply_dark_layout(fig_pain), use_container_width=True, key="c_pain")
             st.markdown('</div>', unsafe_allow_html=True)
