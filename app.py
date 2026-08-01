@@ -12,6 +12,7 @@ import requests
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
+# Configure logging
 logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -40,7 +41,12 @@ except ImportError:
 # ---------------------------------------------------------
 # 2. BLOOMBERG-GRADE CSS
 # ---------------------------------------------------------
-st.set_page_config(page_title="Prince PAX | FlashAlpha Nifty Terminal", page_icon="📊", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(
+    page_title="Prince PAX | FlashAlpha Nifty Terminal",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
 st.markdown(
     """
@@ -108,7 +114,7 @@ class MathEngine:
         total_loss = np.sum(ce_oi * np.maximum(K - S, 0) + pe_oi * np.maximum(S - K, 0), axis=1)
         return int(strikes[np.argmin(total_loss)])
 
-def generate_nifty_narrative(spot, net_gex, gamma_flip, call_wall, put_wall, max_pain, atm_iv, vrp, strad_regime, is_0dte):
+def generate_nifty_narrative(spot, net_gex, gamma_flip, call_wall, put_wall, max_pain, atm_iv, vrp, strad_regime, is_0dte, pcr_signal, gex_signal, vega_signal, downside_support, upside_resistance, implied_move_pct):
     regime = "positive_gamma" if net_gex > 0 else "negative_gamma"
     gex_text = "Dealers are net long gamma; expect mean-reverting tape and suppressed volatility." if net_gex > 0 else "Dealers are net short gamma; expect trending, volatile tape with accelerated moves."
     flip_text = f"Gamma flip is at {gamma_flip:,.0f}. " + ("Spot is above flip (bullish stabilization)." if spot > gamma_flip else "Spot is below flip (bearish acceleration).")
@@ -117,7 +123,10 @@ def generate_nifty_narrative(spot, net_gex, gamma_flip, call_wall, put_wall, max
     strad_text = f"Straddle regime: {strad_regime}."
     zdte_text = " Zero-DTE pin risk is elevated today." if is_0dte else ""
     
-    return f"**{regime.replace('_', ' ').title()} Regime.** {gex_text} {flip_text} {wall_text} {vrp_text} {strad_text}{zdte_text}"
+    return f"""**{regime.replace('_', ' ').title()} Regime.** {gex_text} {flip_text} 
+**PCR Signal:** {pcr_signal}. **GEX Bias:** {gex_signal}. **Vega Outlook:** {vega_signal}.
+{wall_text} {vrp_text} {strad_text}{zdte_text}
+**Intraday Range:** {downside_support:.0f} - {upside_resistance:.0f} (±{implied_move_pct:.2f}%)."""
 
 # ---------------------------------------------------------
 # 4. DATA ENGINES
@@ -269,7 +278,9 @@ def main():
     
     total_net_gex = df_oc["Net_GEX"].sum()
     total_ce_oi, total_pe_oi = df_oc["CE_OI"].sum(), df_oc["PE_OI"].sum()
+    total_ce_vol, total_pe_vol = df_oc["CE_Vol"].sum(), df_oc["PE_Vol"].sum()
     current_pcr = total_pe_oi / total_ce_oi if total_ce_oi > 0 else 0.0
+    vol_pcr = total_pe_vol / total_ce_vol if total_ce_vol > 0 else 0.0
     
     call_wall_gex = df_f.loc[df_f['Net_GEX'].idxmax()]['Strike'] if not df_f.empty else atm_strike
     put_wall_gex = df_f.loc[df_f['Net_GEX'].idxmin()]['Strike'] if not df_f.empty else atm_strike
@@ -278,11 +289,34 @@ def main():
     atm_row = df_oc[df_oc["Strike"] == atm_strike]
     atm_iv = ((atm_row["CE_IV"].values[0] if not atm_row.empty else 0) + (atm_row["PE_IV"].values[0] if not atm_row.empty else 0)) / 2.0
     vrp = atm_iv - Config.ASSUMED_HV_20D
-    expected_move = spot * (atm_iv / 100) * math.sqrt(1 / 252)  # 1-day expected move
-    hedging_up = total_net_gex * 0.01  # Approx dealer flow for +1% move
-    hedging_down = -total_net_gex * 0.01 # Approx dealer flow for -1% move
+    implied_move_pct = atm_iv / 100 * math.sqrt(1 / 252) * 100
+    upside_resistance = spot * (1 + implied_move_pct/100)
+    downside_support = spot * (1 - implied_move_pct/100)
     
-    narrative = generate_nifty_narrative(spot, total_net_gex, gamma_flip, call_wall_gex, put_wall_gex, max_pain, atm_iv, vrp, "NORMAL", is_0dte)
+    # Aggregate Exposures
+    total_put_theta = df_oc[df_oc["Strike"] >= atm_strike - 300]["PE_LTP"].sum() * -0.05
+    total_call_theta = df_oc[df_oc["Strike"] <= atm_strike + 300]["CE_LTP"].sum() * -0.05
+    total_put_vega = (df_oc["PE_OI"] * df_oc["PE_IV"] * 0.01 * Config.NIFTY_LOT_SIZE).sum() / 1e6
+    total_call_vega = (df_oc["CE_OI"] * df_oc["CE_IV"] * 0.01 * Config.NIFTY_LOT_SIZE).sum() / 1e6
+    total_put_gex = df_oc[df_oc["Strike"] <= spot]["Put_GEX"].sum()
+    total_call_gex = df_oc[df_oc["Strike"] >= spot]["Call_GEX"].sum()
+    total_put_vex = (df_oc["PE_OI"] * df_oc["PE_IV"] * 0.1 * Config.NIFTY_LOT_SIZE).sum() / 1e4
+    total_call_vex = (df_oc["CE_OI"] * df_oc["CE_IV"] * 0.1 * Config.NIFTY_LOT_SIZE).sum() / 1e4
+    
+    # Intraday Interpretations
+    if current_pcr > 1.2: pcr_signal = "🟢 BULLISH: Strong put writing indicates support building"
+    elif current_pcr < 0.8: pcr_signal = "🔴 BEARISH: Heavy call writing suggests resistance"
+    else: pcr_signal = "🟡 NEUTRAL: Balanced positioning"
+    
+    if total_call_gex > abs(total_put_gex) * 1.2: gex_signal = "🟢 CALL DOMINANCE: Dealers short gamma above spot → upside acceleration risk"
+    elif abs(total_put_gex) > total_call_gex * 1.2: gex_signal = "🔴 PUT DOMINANCE: Dealers short gamma below spot → downside acceleration risk"
+    else: gex_signal = "🟡 BALANCED GEX: Mean-reverting conditions likely"
+    
+    if total_put_vega > total_call_vega * 1.1: vega_signal = "🟢 LONG VEGA BIAS: Market positioned for vol expansion (fear hedge)"
+    elif total_call_vega > total_put_vega * 1.1: vega_signal = "🔴 SHORT VEGA BIAS: Market complacent, vol crush risk"
+    else: vega_signal = "⚪ NEUTRAL VEGA: Balanced vol exposure"
+    
+    narrative = generate_nifty_narrative(spot, total_net_gex, gamma_flip, call_wall_gex, put_wall_gex, max_pain, atm_iv, vrp, "NORMAL", is_0dte, pcr_signal, gex_signal, vega_signal, downside_support, upside_resistance, implied_move_pct)
     
     ws_data = start_websocket(CLIENT_ID, ACCESS_TOKEN)
     nifty_fut = ws_data.get("NIFTY_FUT_LTP", 0.0)
@@ -293,35 +327,185 @@ def main():
     status_cls = "status-live" if is_live else "status-closed"
     st.markdown(f'<div class="status-badge {status_cls}">{"🟢 LIVE MARKET" if is_live else "🟠 MARKET CLOSED"} | Expiry: {selected_expiry} | IST: {now_time} | Lot: {Config.NIFTY_LOT_SIZE}</div>', unsafe_allow_html=True)
     
-    st.markdown(f'<div class="narrative-box">📖 <strong>Market Narrative:</strong> {narrative}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="narrative-box">📖 <strong>Market Narrative:</strong><br>{narrative}</div>', unsafe_allow_html=True)
     
     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-        "📊 Command & Narrative", "🧱 Dealer Exposure (GEX/DEX)", "🌊 Advanced Greeks (VEX/CHEX)",
+        "📊 Command & Intraday", "🧱 Dealer Exposure (GEX/DEX)", "🌊 Advanced Greeks (VEX/CHEX)",
         "📈 Volatility & VRP", "🎯 Zero-DTE & Max Pain", "📋 Data Grid"
     ])
     
-    # TAB 1: COMMAND & NARRATIVE
+    # TAB 1: COMMAND CENTER & INTRADAY ANALYTICS
     with tab1:
+        # Row 1: Core Metrics
         c1, c2, c3, c4, c5, c6 = st.columns(6)
         with c1:
-            st.markdown(f"""<div class="metric-card metric-card-amber"><div class="metric-title">NIFTY SYNTH FUT</div><div class="metric-value">₹{synth:,.2f}</div><div class="metric-sub sub-amber">Spot: ₹{spot:,.2f}</div></div>""", unsafe_allow_html=True)
+            st.markdown(f"""<div class="metric-card metric-card-amber">
+                <div class="metric-title">NIFTY SYNTH FUT</div>
+                <div class="metric-value">₹{synth:,.2f}</div>
+                <div class="metric-sub sub-amber">Spot: ₹{spot:,.2f} | Basis: {basis:+.2f}</div>
+            </div>""", unsafe_allow_html=True)
         with c2:
-            st.markdown(f"""<div class="metric-card metric-card-purple"><div class="metric-title">ATM IV & VRP</div><div class="metric-value">{atm_iv:.1f}%</div><div class="metric-sub {'sub-green' if vrp > 0 else 'sub-red'}">VRP: {vrp:+.1f}%</div></div>""", unsafe_allow_html=True)
+            st.markdown(f"""<div class="metric-card metric-card-purple">
+                <div class="metric-title">ATM IV & VRP</div>
+                <div class="metric-value">{atm_iv:.1f}%</div>
+                <div class="metric-sub {'sub-green' if vrp > 0 else 'sub-red'}">VRP: {vrp:+.1f}% vs {Config.ASSUMED_HV_20D}% HV</div>
+            </div>""", unsafe_allow_html=True)
         with c3:
-            st.markdown(f"""<div class="metric-card metric-card-cyan"><div class="metric-title">EXPECTED MOVE (1D)</div><div class="metric-value">±{expected_move:.1f}</div><div class="metric-sub sub-cyan">1-Sigma Range</div></div>""", unsafe_allow_html=True)
+            st.markdown(f"""<div class="metric-card metric-card-cyan">
+                <div class="metric-title">EXPECTED MOVE (1D)</div>
+                <div class="metric-value">±{implied_move_pct:.2f}%</div>
+                <div class="metric-sub sub-cyan">Range: {downside_support:.0f}-{upside_resistance:.0f}</div>
+            </div>""", unsafe_allow_html=True)
         with c4:
-            st.markdown(f"""<div class="metric-card {'metric-card-green' if total_net_gex >= 0 else 'metric-card-red'}"><div class="metric-title">NET GEX (₹L)</div><div class="metric-value">{total_net_gex/1e5:+,.1f}</div><div class="metric-sub sub-{'green' if total_net_gex >= 0 else 'red'}">{'Long Gamma' if total_net_gex >= 0 else 'Short Gamma'}</div></div>""", unsafe_allow_html=True)
+            st.markdown(f"""<div class="metric-card {'metric-card-green' if total_net_gex >= 0 else 'metric-card-red'}">
+                <div class="metric-title">NET GEX (₹L)</div>
+                <div class="metric-value">{total_net_gex/1e5:+,.1f}</div>
+                <div class="metric-sub sub-{'green' if total_net_gex >= 0 else 'red'}">{'Long Gamma' if total_net_gex >= 0 else 'Short Gamma'}</div>
+            </div>""", unsafe_allow_html=True)
         with c5:
-            st.markdown(f"""<div class="metric-card metric-card-amber"><div class="metric-title">PCR (OI)</div><div class="metric-value">{current_pcr:.2f}</div><div class="metric-sub sub-amber">Total: {(total_ce_oi+total_pe_oi)/1e6:.1f}M</div></div>""", unsafe_allow_html=True)
+            st.markdown(f"""<div class="metric-card metric-card-amber">
+                <div class="metric-title">PCR (OI)</div>
+                <div class="metric-value">{current_pcr:.2f}</div>
+                <div class="metric-sub sub-amber">Vol PCR: {vol_pcr:.2f}</div>
+            </div>""", unsafe_allow_html=True)
         with c6:
-            st.markdown(f"""<div class="metric-card metric-card-cyan"><div class="metric-title">FUTURES BASIS</div><div class="metric-value">{basis:+.2f}</div><div class="metric-sub sub-cyan">Fut: ₹{nifty_fut:,.1f}</div></div>""", unsafe_allow_html=True)
+            st.markdown(f"""<div class="metric-card metric-card-cyan">
+                <div class="metric-title">FUTURES BASIS</div>
+                <div class="metric-value">{basis:+.2f}</div>
+                <div class="metric-sub sub-cyan">Fut: ₹{nifty_fut:,.1f}</div>
+            </div>""", unsafe_allow_html=True)
         
         st.markdown("<br>", unsafe_allow_html=True)
+        
+        # Row 2: Key Levels
         l1, l2, l3, l4 = st.columns(4)
         with l1: st.markdown(f"""<div class="metric-card metric-card-purple"><div class="metric-title">GAMMA FLIP</div><div class="metric-value">₹{gamma_flip:,.0f}</div><div class="metric-sub sub-purple">Zero-Crossing</div></div>""", unsafe_allow_html=True)
         with l2: st.markdown(f"""<div class="metric-card metric-card-green"><div class="metric-title">CALL WALL</div><div class="metric-value">₹{call_wall_gex:,.0f}</div><div class="metric-sub sub-green">Resistance</div></div>""", unsafe_allow_html=True)
         with l3: st.markdown(f"""<div class="metric-card metric-card-red"><div class="metric-title">PUT WALL</div><div class="metric-value">₹{put_wall_gex:,.0f}</div><div class="metric-sub sub-red">Support</div></div>""", unsafe_allow_html=True)
         with l4: st.markdown(f"""<div class="metric-card metric-card-amber"><div class="metric-title">MAX PAIN</div><div class="metric-value">₹{max_pain:,.0f}</div><div class="metric-sub sub-amber">Expiry Magnet</div></div>""", unsafe_allow_html=True)
+        
+        st.markdown("<br>", unsafe_allow_html=True)
+        
+        # Row 3: Aggregate Exposure Metrics (FlashAlpha Style)
+        st.markdown("### 📊 Aggregate Option Chain Exposures")
+        e1, e2, e3, e4, e5, e6, e7 = st.columns(7)
+        
+        with e1:
+            st.markdown(f"""<div class="metric-card" style="border-top-color: #48BB78;">
+                <div class="metric-title">PUT OI</div>
+                <div class="metric-value" style="color: #48BB78;">{total_pe_oi/1e6:.1f}M</div>
+                <div class="metric-sub">Call OI: {total_ce_oi/1e6:.1f}M</div>
+            </div>""", unsafe_allow_html=True)
+        
+        with e2:
+            st.markdown(f"""<div class="metric-card" style="border-top-color: #63B3ED;">
+                <div class="metric-title">VOLUME</div>
+                <div class="metric-value" style="color: #F56565;">C:{total_ce_vol/1e6:.1f}M</div>
+                <div class="metric-sub">P:{total_pe_vol/1e6:.1f}M</div>
+            </div>""", unsafe_allow_html=True)
+        
+        with e3:
+            st.markdown(f"""<div class="metric-card" style="border-top-color: #ECC94B;">
+                <div class="metric-title">THETA</div>
+                <div class="metric-value" style="color: #F56565;">{total_call_theta+total_put_theta:-,.0f}</div>
+                <div class="metric-sub">Daily Decay (₹)</div>
+            </div>""", unsafe_allow_html=True)
+        
+        with e4:
+            st.markdown(f"""<div class="metric-card" style="border-top-color: #9F7AEA;">
+                <div class="metric-title">VEGA</div>
+                <div class="metric-value" style="color: #48BB78;">P:{total_put_vega:.0f}</div>
+                <div class="metric-sub">C:{total_call_vega:.0f}</div>
+            </div>""", unsafe_allow_html=True)
+        
+        with e5:
+            st.markdown(f"""<div class="metric-card" style="border-top-color: #0BC5EA;">
+                <div class="metric-title">GEX</div>
+                <div class="metric-value" style="color: {'#48BB78' if total_call_gex > abs(total_put_gex) else '#F56565'};">C:{total_call_gex/1e5:.0f}</div>
+                <div class="metric-sub">P:{total_put_gex/1e5:.0f}</div>
+            </div>""", unsafe_allow_html=True)
+        
+        with e6:
+            st.markdown(f"""<div class="metric-card" style="border-top-color: #AB47BC;">
+                <div class="metric-title">VEX</div>
+                <div class="metric-value" style="color: #48BB78;">P:{total_put_vex:.0f}</div>
+                <div class="metric-sub">C:{total_call_vex:.0f}</div>
+            </div>""", unsafe_allow_html=True)
+
+        with e7:
+            st.markdown(f"""<div class="metric-card" style="border-top-color: #F56565;">
+                <div class="metric-title">SPEX</div>
+                <div class="metric-value" style="color: #F56565;">{df_f['Net_SPEX'].sum()/1e3:+.1f}</div>
+                <div class="metric-sub">Acceleration Risk</div>
+            </div>""", unsafe_allow_html=True)
+        
+        st.markdown("<br>", unsafe_allow_html=True)
+        
+        # Row 4: Open Interest Charts
+        r1c1, r1c2 = st.columns(2)
+        
+        with r1c1:
+            st.markdown('<div class="chart-container"><div class="chart-title">Open Interest Distribution <div class="info-tooltip">ⓘ<span class="tooltip-text">Green = Put OI, Red = Call OI. Higher bars indicate stronger support/resistance levels.</span></div></div>', unsafe_allow_html=True)
+            fig_oi = go.Figure()
+            fig_oi.add_trace(go.Bar(x=df_f["Strike"], y=df_f["PE_OI"]/1e6, name="Put OI", marker_color="#48BB78", opacity=0.7))
+            fig_oi.add_trace(go.Bar(x=df_f["Strike"], y=df_f["CE_OI"]/1e6, name="Call OI", marker_color="#F56565", opacity=0.7))
+            fig_oi.add_vline(x=spot, line_dash="solid", line_color="#ECC94B", line_width=2, annotation_text="Spot")
+            fig_oi.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", margin=dict(l=0,r=0,t=10,b=0), height=300, barmode="group", legend=dict(orientation="h", y=1.12), xaxis=dict(tickmode='array', tickvals=df_f["Strike"], ticktext=strike_labels, tickangle=-45), yaxis_title="Open Interest (Millions)")
+            st.plotly_chart(fig_oi, use_container_width=True, key="oi_dist")
+            st.markdown('</div>', unsafe_allow_html=True)
+        
+        with r1c2:
+            st.markdown('<div class="chart-container"><div class="chart-title">Intraday Volume Flow <div class="info-tooltip">ⓘ<span class="tooltip-text">Real-time volume distribution. High volume at specific strikes indicates active positioning or hedging.</span></div></div>', unsafe_allow_html=True)
+            fig_vol = go.Figure()
+            fig_vol.add_trace(go.Bar(x=df_f["Strike"], y=df_f["PE_Vol"]/1e6, name="Put Vol", marker_color="#48BB78", opacity=0.7))
+            fig_vol.add_trace(go.Bar(x=df_f["Strike"], y=df_f["CE_Vol"]/1e6, name="Call Vol", marker_color="#F56565", opacity=0.7))
+            fig_vol.add_vline(x=spot, line_dash="solid", line_color="#ECC94B", line_width=2)
+            fig_vol.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", margin=dict(l=0,r=0,t=10,b=0), height=300, barmode="group", legend=dict(orientation="h", y=1.12), xaxis=dict(tickmode='array', tickvals=df_f["Strike"], ticktext=strike_labels, tickangle=-45), yaxis_title="Volume (Millions)")
+            st.plotly_chart(fig_vol, use_container_width=True, key="vol_flow")
+            st.markdown('</div>', unsafe_allow_html=True)
+        
+        st.markdown("<br>", unsafe_allow_html=True)
+        
+        # Row 5: Intraday Signals & Interpretations
+        st.markdown("### 🎯 Intraday Movement Signals")
+        s1, s2, s3 = st.columns(3)
+        
+        with s1:
+            signal_color = "sub-green" if current_pcr > 1 else "sub-red" if current_pcr < 0.9 else "sub-amber"
+            st.markdown(f"""<div class="metric-card metric-card-{'green' if current_pcr > 1 else 'red' if current_pcr < 0.9 else 'amber'}">
+                <div class="metric-title">PCR SIGNAL</div>
+                <div class="metric-value">{current_pcr:.2f}</div>
+                <div class="metric-sub {signal_color}">{pcr_signal.split(':')[0]}</div>
+            </div>""", unsafe_allow_html=True)
+        
+        with s2:
+            gex_color = "sub-green" if total_call_gex > abs(total_put_gex) else "sub-red"
+            st.markdown(f"""<div class="metric-card metric-card-{'green' if total_call_gex > abs(total_put_gex) else 'red'}">
+                <div class="metric-title">GEX BIAS</div>
+                <div class="metric-value">{total_call_gex/abs(total_put_gex) if total_put_gex != 0 else 1:.2f}x</div>
+                <div class="metric-sub {gex_color}">{gex_signal.split(':')[0]}</div>
+            </div>""", unsafe_allow_html=True)
+        
+        with s3:
+            vega_color = "sub-green" if total_put_vega > total_call_vega else "sub-red"
+            st.markdown(f"""<div class="metric-card metric-card-{'green' if total_put_vega > total_call_vega else 'red'}">
+                <div class="metric-title">VEGA BIAS</div>
+                <div class="metric-value">{total_put_vega/total_call_vega if total_call_vega != 0 else 1:.2f}x</div>
+                <div class="metric-sub {vega_color}">{vega_signal.split(':')[0]}</div>
+            </div>""", unsafe_allow_html=True)
+        
+        # Detailed Interpretations
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown(f"""
+        <div class="narrative-box">
+            <strong>📊 Intraday Interpretation:</strong><br>
+            • <strong>PCR Analysis:</strong> {pcr_signal}. {'Put writers are aggressive, creating support.' if current_pcr > 1.1 else 'Call writers dominate, capping upside.' if current_pcr < 0.9 else 'Balanced positioning suggests range-bound trade.'}<br>
+            • <strong>GEX Dynamics:</strong> {gex_signal}. {'Expect accelerated moves if spot breaks key levels.' if abs(total_call_gex) - abs(total_put_gex) > abs(total_put_gex) * 0.3 else 'Dealer hedging will dampen volatility.'}<br>
+            • <strong>Vega Positioning:</strong> {vega_signal}. {'Market is hedged for vol expansion (fear).' if total_put_vega > total_call_vega * 1.1 else 'Complacent positioning risks vol crush.'}<br>
+            • <strong>Theta Decay:</strong> ₹{abs(total_call_theta + total_put_theta):,.0f} daily time decay across chain. {'Accelerating into close.' if is_0dte else 'Moderate decay rate.'}<br>
+            • <strong>Intraday Range:</strong> High-probability range: <strong>{downside_support:.0f} - {upside_resistance:.0f}</strong>. Breakouts beyond this range require volume confirmation.
+        </div>
+        """, unsafe_allow_html=True)
 
     # TAB 2: DEALER EXPOSURE (GEX/DEX)
     with tab2:
@@ -350,9 +534,9 @@ def main():
         
         st.markdown('<div class="chart-container"><div class="chart-title">FlashAlpha Hedging Scenarios (±1% Spot Move)</div>', unsafe_allow_html=True)
         h1, h2, h3 = st.columns(3)
-        with h1: st.markdown(f"""<div style="text-align:center;"><div style="color:#A0AEC0;font-size:0.8rem;">SPOT +1% MOVE</div><div style="font-size:1.5rem;font-weight:800;color:#F56565;">{hedging_up/1e5:+,.1f}L</div><div style="font-size:0.75rem;color:#A0AEC0;">Est. Dealer Selling</div></div>""", unsafe_allow_html=True)
+        with h1: st.markdown(f"""<div style="text-align:center;"><div style="color:#A0AEC0;font-size:0.8rem;">SPOT +1% MOVE</div><div style="font-size:1.5rem;font-weight:800;color:#F56565;">{total_net_gex * 0.01 / 1e5:+,.1f}L</div><div style="font-size:0.75rem;color:#A0AEC0;">Est. Dealer Selling</div></div>""", unsafe_allow_html=True)
         with h2: st.markdown(f"""<div style="text-align:center;"><div style="color:#A0AEC0;font-size:0.8rem;">CURRENT NET GEX</div><div style="font-size:1.5rem;font-weight:800;color:#63B3ED;">{total_net_gex/1e5:+,.1f}L</div><div style="font-size:0.75rem;color:#A0AEC0;">Total Chain Exposure</div></div>""", unsafe_allow_html=True)
-        with h3: st.markdown(f"""<div style="text-align:center;"><div style="color:#A0AEC0;font-size:0.8rem;">SPOT -1% MOVE</div><div style="font-size:1.5rem;font-weight:800;color:#48BB78;">{hedging_down/1e5:+,.1f}L</div><div style="font-size:0.75rem;color:#A0AEC0;">Est. Dealer Buying</div></div>""", unsafe_allow_html=True)
+        with h3: st.markdown(f"""<div style="text-align:center;"><div style="color:#A0AEC0;font-size:0.8rem;">SPOT -1% MOVE</div><div style="font-size:1.5rem;font-weight:800;color:#48BB78;">{-total_net_gex * 0.01 / 1e5:+,.1f}L</div><div style="font-size:0.75rem;color:#A0AEC0;">Est. Dealer Buying</div></div>""", unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
 
     # TAB 3: ADVANCED GREEKS (VEX/CHEX)
