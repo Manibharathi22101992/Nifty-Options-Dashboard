@@ -11,6 +11,7 @@ import requests
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
+# Graceful fallback in case dhanhq isn't in requirements.txt yet
 try:
     from dhanhq import marketfeed
     DHAN_WS_AVAILABLE = True
@@ -357,6 +358,7 @@ selected_expiry = st.sidebar.selectbox("Primary Expiry", valid_expiries) if vali
 
 df_oc, spot_price, error_remark = fetch_gex_option_chain(selected_expiry)
 
+# TRUE ATM Calculation Anchored to Synthetic Future Price
 synthetic_future = spot_price
 if df_oc is not None and not df_oc.empty:
     spot_atm = int(round(spot_price / 50) * 50)
@@ -372,6 +374,7 @@ if "chain_snapshots" not in st.session_state: st.session_state["chain_snapshots"
 if "last_chain_snap_ts" not in st.session_state: st.session_state["last_chain_snap_ts"] = 0
 
 for key, cols in [
+    ("absorption_history", ["Date", "Timestamp", "Spot", "Fut_LTP", "CE_OI", "PE_OI", "CE_Vol", "PE_Vol"]),
     ("oi_snapshots", ["Date", "Timestamp", "Strike", "CE_OI", "PE_OI"]),
     ("iv_spread_history", ["Date", "Time", "Strike", "CE_IV", "PE_IV", "IV_Spread", "Spot"]),
     ("pcr_history", ["Date", "Timestamp_dt", "Time", "PCR", "Vol_PCR", "Delta_PCR_5m", "Delta_PCR_15m", "Total_CE_OI", "Total_PE_OI"]),
@@ -385,7 +388,7 @@ for key, cols in [
 if "straddle_anchor_price" not in st.session_state: st.session_state["straddle_anchor_price"] = None
 
 if st.sidebar.button("🗑️ Reset Session Cache"):
-    for key in ["oi_snapshots", "iv_spread_history", "pcr_history", "gex_history", "synth_history", "delta_oi_history", "straddle_history"]:
+    for key in ["absorption_history", "oi_snapshots", "iv_spread_history", "pcr_history", "gex_history", "synth_history", "delta_oi_history", "straddle_history"]:
         st.session_state[key] = pd.DataFrame(columns=st.session_state[key].columns)
     st.session_state["chain_snapshots"] = {}
     st.session_state["last_chain_snap_ts"] = 0
@@ -418,8 +421,11 @@ elif df_oc is not None and not df_oc.empty:
     df_filtered = df_oc[(df_oc["Strike"] >= atm_strike - 550) & (df_oc["Strike"] <= atm_strike + 550)].copy()
     strike_labels = df_filtered["Strike"].astype(str).tolist()
 
+    total_ce_oi_sum = df_oc["CE_OI"].sum()
+    total_pe_oi_sum = df_oc["PE_OI"].sum()
+
     if is_market_live:
-        for key in ["oi_snapshots", "iv_spread_history", "pcr_history", "gex_history", "synth_history", "delta_oi_history", "straddle_history"]:
+        for key in ["absorption_history", "oi_snapshots", "iv_spread_history", "pcr_history", "gex_history", "synth_history", "delta_oi_history", "straddle_history"]:
             if not st.session_state[key].empty and st.session_state[key].iloc[-1]["Date"] != today_date_str:
                 st.session_state[key] = st.session_state[key].iloc[0:0]
                 if key == "straddle_history": st.session_state["straddle_anchor_price"] = None
@@ -430,6 +436,12 @@ elif df_oc is not None and not df_oc.empty:
             st.session_state["last_chain_snap_ts"] = now_ts
             if len(st.session_state["chain_snapshots"]) > 80:
                 del st.session_state["chain_snapshots"][next(iter(st.session_state["chain_snapshots"]))]
+
+        abs_df = st.session_state["absorption_history"]
+        if abs_df.empty or (now_ts - abs_df["Timestamp"].max() >= 60):
+            new_abs = pd.DataFrame([{"Date": today_date_str, "Timestamp": now_ts, "Spot": spot_price, "Fut_LTP": live_ws_data.get("NIFTY_FUT_LTP", spot_price), "CE_OI": total_ce_oi_sum, "PE_OI": total_pe_oi_sum, "CE_Vol": df_oc["CE_Vol"].sum(), "PE_Vol": df_oc["PE_Vol"].sum()}])
+            st.session_state["absorption_history"] = pd.concat([abs_df, new_abs], ignore_index=True)
+            save_persisted_df(st.session_state["absorption_history"], "absorption_history")
 
         oi_snap = st.session_state["oi_snapshots"]
         if oi_snap.empty or (now_ts - oi_snap["Timestamp"].max() >= 60):
@@ -443,15 +455,14 @@ elif df_oc is not None and not df_oc.empty:
             new_ticks = [{"Date": today_date_str, "Time": now_time_str, "Strike": r["Strike"], "CE_IV": r["CE_IV"], "PE_IV": r["PE_IV"], "IV_Spread": r["IV_Spread"], "Spot": spot_price} for _, r in df_filtered.iterrows()]
             st.session_state["iv_spread_history"] = pd.concat([st.session_state["iv_spread_history"], pd.DataFrame(new_ticks)], ignore_index=True)
             save_persisted_df(st.session_state["iv_spread_history"], "iv_spread_history")
-
-        total_ce_oi, total_pe_oi = df_oc["CE_OI"].sum(), df_oc["PE_OI"].sum()
-        current_pcr = total_pe_oi / total_ce_oi if total_ce_oi > 0 else 0.0
+        
+        current_pcr = total_pe_oi_sum / total_ce_oi_sum if total_ce_oi_sum > 0 else 0.0
         vol_pcr = df_oc["PE_Vol"].sum() / df_oc["CE_Vol"].sum() if df_oc["CE_Vol"].sum() > 0 else 0.0
         
         pcr_df = st.session_state["pcr_history"]
         if pcr_df.empty or pcr_df.iloc[-1]["Time"] != now_time_str:
             dp_15m = current_pcr - pcr_df[pcr_df["Timestamp_dt"] <= now_ist - datetime.timedelta(minutes=15)].iloc[-1]["PCR"] if not pcr_df[pcr_df["Timestamp_dt"] <= now_ist - datetime.timedelta(minutes=15)].empty else 0.0
-            st.session_state["pcr_history"] = pd.concat([pcr_df, pd.DataFrame([{"Date": today_date_str, "Timestamp_dt": now_ist, "Time": now_time_str, "PCR": current_pcr, "Vol_PCR": vol_pcr, "Delta_PCR_5m": 0.0, "Delta_PCR_15m": dp_15m, "Total_CE_OI": total_ce_oi, "Total_PE_OI": total_pe_oi}])], ignore_index=True)
+            st.session_state["pcr_history"] = pd.concat([pcr_df, pd.DataFrame([{"Date": today_date_str, "Timestamp_dt": now_ist, "Time": now_time_str, "PCR": current_pcr, "Vol_PCR": vol_pcr, "Delta_PCR_5m": 0.0, "Delta_PCR_15m": dp_15m, "Total_CE_OI": total_ce_oi_sum, "Total_PE_OI": total_pe_oi_sum}])], ignore_index=True)
             save_persisted_df(st.session_state["pcr_history"], "pcr_history")
 
         gex_df = st.session_state["gex_history"]
@@ -518,7 +529,7 @@ elif df_oc is not None and not df_oc.empty:
     st.markdown("<br>", unsafe_allow_html=True)
 
     n1, n2, n3, n4 = st.columns(4)
-    n1.markdown(f'<div class="metric-card metric-card-amber"><div class="metric-title">NIFTY SYNTH FUT</div><div class="metric-value">₹{synthetic_future:,.2f}</div><div class="metric-sub sub-amber">Spot: ₹{spot_price:,.2f} | Pain: {max_pain_strike}</div></div>', unsafe_allow_html=True)
+    n1.markdown(f'<div class="metric-card metric-card-amber"><div class="metric-title">NIFTY SYNTH FUT (ATM)</div><div class="metric-value">₹{synthetic_future:,.2f}</div><div class="metric-sub sub-amber">Spot: ₹{spot_price:,.2f} | Pain: {max_pain_strike}</div></div>', unsafe_allow_html=True)
     n2.markdown(f'<div class="metric-card {"metric-card-green" if target_iv_spread >= 0 else "metric-card-red"}"><div class="metric-title">{selected_target_strike} IV SPREAD</div><div class="metric-value">{target_iv_spread:+.2f}%</div><div class="metric-sub {"sub-green" if target_iv_spread >= 0 else "sub-red"}">CE {(target_row["CE_IV"].values[0]*100) if not target_row.empty else 0:.1f}% | PE {(target_row["PE_IV"].values[0]*100) if not target_row.empty else 0:.1f}%</div></div>', unsafe_allow_html=True)
     dp_15m = pcr_df.iloc[-1]["Delta_PCR_15m"] if not pcr_df.empty else 0.0
     n3.markdown(f'<div class="metric-card {"metric-card-green" if dp_15m >= 0.15 else ("metric-card-red" if dp_15m <= -0.15 else "metric-card-amber")}"><div class="metric-title">ΔPCR 15M VELOCITY</div><div class="metric-value">{dp_15m:+.2f}</div><div class="metric-sub {"sub-green" if dp_15m >= 0.15 else ("sub-red" if dp_15m <= -0.15 else "sub-amber")}">PCR: {pcr_df.iloc[-1]["PCR"] if not pcr_df.empty else 0:.2f}</div></div>', unsafe_allow_html=True)
@@ -576,6 +587,58 @@ elif df_oc is not None and not df_oc.empty:
     ])
 
     with tab1: # INTRADAY FLOW
+        st.markdown('<div class="chart-container" style="padding-bottom:10px;"><div class="chart-title">Intraday Absorption Engine (Nifty Future vs Options Flow)</div>', unsafe_allow_html=True)
+        abs_data = []
+        windows = [5, 10, 15, 30, 60]
+        abs_df_state = st.session_state["absorption_history"]
+        
+        if not abs_df_state.empty:
+            current_row = abs_df_state.iloc[-1]
+            now_ts_abs = current_row["Timestamp"]
+            
+            for w in windows:
+                target_ts = now_ts_abs - (w * 60)
+                past_df = abs_df_state[abs_df_state["Timestamp"] <= target_ts]
+                
+                if not past_df.empty:
+                    past_row = past_df.iloc[-1]
+                    d_fut = current_row["Fut_LTP"] - past_row["Fut_LTP"]
+                    d_ce_oi = current_row["CE_OI"] - past_row["CE_OI"]
+                    d_pe_oi = current_row["PE_OI"] - past_row["PE_OI"]
+                    
+                    oi_diff = abs(d_ce_oi - d_pe_oi)
+                    signal, color = "⚪ Neutral Flow", "#8A93A6"
+                    if d_ce_oi > d_pe_oi and oi_diff > 15000 and d_fut <= 15:
+                        signal, color = "🔴 Call Absorption (Sellers Defending Ceiling)", "#FF5252"
+                    elif d_pe_oi > d_ce_oi and oi_diff > 15000 and d_fut >= -15:
+                        signal, color = "🟢 Put Absorption (Buyers Defending Floor)", "#00E676"
+                    elif d_ce_oi > d_pe_oi and d_fut > 15:
+                        signal, color = "🔴 Call Writing (Trailing Resistance)", "#FF5252"
+                    elif d_pe_oi > d_ce_oi and d_fut < -15:
+                        signal, color = "🟢 Put Writing (Trailing Support)", "#00E676"
+
+                    abs_data.append({
+                        "Timeframe": f"Last {w} Min",
+                        "Δ Future": f"{d_fut:+.1f} pts",
+                        "Δ Call OI": f"{d_ce_oi:+,.0f}",
+                        "Δ Put OI": f"{d_pe_oi:+,.0f}",
+                        "Signal": f"<span style='color:{color}; font-weight:700;'>{signal}</span>"
+                    })
+                else:
+                    abs_data.append({"Timeframe": f"Last {w} Min", "Δ Future": "Gathering...", "Δ Call OI": "Gathering...", "Δ Put OI": "Gathering...", "Signal": "<span style='color:#8A93A6;'>Gathering...</span>"})
+        
+        if abs_data:
+            table_html = "<table style='width:100%; text-align:left; color:#D1D4DC; border-collapse:collapse; font-size:0.9rem;'>"
+            table_html += "<tr style='border-bottom: 1px solid #2A2E39;'><th style='padding:10px;'>Time Window</th><th style='padding:10px;'>Δ Nifty Future</th><th style='padding:10px; color:#00E676;'>Δ Call OI (CE)</th><th style='padding:10px; color:#FF5252;'>Δ Put OI (PE)</th><th style='padding:10px;'>Absorption Analysis</th></tr>"
+            for row in abs_data:
+                table_html += f"<tr style='border-bottom: 1px solid #2A2E39;'><td style='padding:10px;'><b>{row['Timeframe']}</b></td><td style='padding:10px;'>{row['Δ Future']}</td><td style='padding:10px;'>{row['Δ Call OI']}</td><td style='padding:10px;'>{row['Δ Put OI']}</td><td style='padding:10px;'>{row['Signal']}</td></tr>"
+            table_html += "</table>"
+            st.markdown(table_html, unsafe_allow_html=True)
+        else:
+            st.info("Gathering historical data for Intraday Absorption Engine. Please wait 5 minutes.")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+
         r1c1, r1c2 = st.columns(2)
         with r1c1:
             st.markdown(f'<div class="chart-container"><div class="chart-title">Intraday IV Spread Movement ({selected_target_strike})</div>', unsafe_allow_html=True)
@@ -839,7 +902,7 @@ elif df_oc is not None and not df_oc.empty:
             
         with v4:
             st.markdown('<div class="chart-container"><div class="chart-title">OpenBull 3D Volatility Surface</div>', unsafe_allow_html=True)
-            st.markdown('<div class="interp-box">💡 <b>3D Vol Skew Surface:</b> Visualizes IV across Strike (X) and Days (Y). Peaks indicate localized options demand.</div>', unsafe_allow_html=True)
+            st.markdown('<div class="interp-box">💡 <b>3D Vol Skew Surface:</b> Visualizes IV across Strike (X) and Days (Y). Humps indicate localized options demand.</div>', unsafe_allow_html=True)
             if not df_surface.empty:
                 pivot_surface = df_surface.pivot_table(index='Days', columns='Strike', values='IV', aggfunc='mean').ffill(axis=1).bfill(axis=1).fillna(0)
                 fig_surf = go.Figure(data=[go.Surface(z=pivot_surface.values, x=pivot_surface.columns.tolist(), y=pivot_surface.index.tolist(), colorscale='Viridis', showscale=False)])
