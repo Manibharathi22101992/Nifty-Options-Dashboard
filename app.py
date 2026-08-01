@@ -4,13 +4,13 @@ import time
 import os
 import threading
 import pandas as pd
+import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 import requests
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
-# Graceful fallback in case dhanhq isn't in requirements.txt yet
 try:
     from dhanhq import marketfeed
     DHAN_WS_AVAILABLE = True
@@ -86,7 +86,6 @@ st.markdown(
         line-height: 1.3;
     }
 
-    /* Fixed CSS-Based Tooltip */
     .info-tooltip {
         position: relative;
         display: inline-block;
@@ -98,48 +97,24 @@ st.markdown(
         z-index: 999999;
     }
     .info-tooltip .tooltip-text {
-        visibility: hidden;
-        width: 260px;
-        background-color: #1E2638;
-        color: #E0E6ED;
-        text-align: left;
-        border-radius: 6px;
-        padding: 10px 14px;
-        position: absolute;
-        top: 140%; 
-        right: -10px;
-        opacity: 0;
-        transition: opacity 0.2s;
-        border: 1px solid #3B4252;
-        font-size: 0.75rem;
-        font-weight: 500;
-        box-shadow: 0px 4px 15px rgba(0,0,0,0.8);
-        line-height: 1.4;
+        visibility: hidden; width: 260px; background-color: #1E2638; color: #E0E6ED; text-align: left;
+        border-radius: 6px; padding: 10px 14px; position: absolute; top: 140%; right: -10px;
+        opacity: 0; transition: opacity 0.2s; border: 1px solid #3B4252; font-size: 0.75rem;
+        font-weight: 500; box-shadow: 0px 4px 15px rgba(0,0,0,0.8); line-height: 1.4;
     }
     .info-tooltip .tooltip-text::after {
-        content: "";
-        position: absolute;
-        bottom: 100%;
-        right: 15px;
-        border-width: 6px;
-        border-style: solid;
-        border-color: transparent transparent #3B4252 transparent;
+        content: ""; position: absolute; bottom: 100%; right: 15px; border-width: 6px;
+        border-style: solid; border-color: transparent transparent #3B4252 transparent;
     }
     .info-tooltip:hover .tooltip-text { visibility: visible; opacity: 1; }
     .info-tooltip:hover { color: #FFFFFF; }
 
     .status-badge {
-        padding: 4px 10px;
-        border-radius: 4px;
-        font-weight: 700;
-        font-size: 0.75rem;
-        display: inline-block;
-        margin-right: 10px;
+        padding: 4px 10px; border-radius: 4px; font-weight: 700; font-size: 0.75rem; display: inline-block; margin-right: 10px;
     }
     .status-live { background-color: rgba(0, 230, 118, 0.15); border: 1px solid #00E676; color: #00E676; }
     .status-closed { background-color: rgba(255, 167, 38, 0.15); border: 1px solid #FFA726; color: #FFA726; }
     
-    /* Streamlit Tabs Styling */
     div[data-testid="stTabs"] button { color: #8A93A6; font-weight: 600; font-size: 0.9rem; }
     div[data-testid="stTabs"] button[aria-selected="true"] { color: #00E676; border-bottom-color: #00E676; }
     </style>
@@ -160,30 +135,15 @@ if not CLIENT_ID or not ACCESS_TOKEN:
 NIFTY_LOT_SIZE = 25
 
 def apply_dark_layout(fig, height=250, is_strike_axis=False, df_filtered=None, atm_strike=None):
-    """Centralized Plotly layout engine for Tradytics-style dark UI spacing and strike axes."""
     fig.update_layout(
-        template="plotly_dark",
-        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        margin=dict(l=5, r=5, t=10, b=5),
-        height=height,
-        legend=dict(orientation="h", y=1.1, x=0, font=dict(size=10))
+        template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        margin=dict(l=5, r=5, t=10, b=5), height=height, legend=dict(orientation="h", y=1.1, x=0, font=dict(size=10))
     )
-    
     if is_strike_axis and df_filtered is not None and not df_filtered.empty and atm_strike is not None:
         strike_labels = df_filtered["Strike"].astype(str).tolist()
-        fig.update_xaxes(
-            range=[atm_strike - 550, atm_strike + 550],
-            tickmode='array',
-            tickvals=df_filtered["Strike"],
-            ticktext=strike_labels,
-            tickangle=-45,
-            gridcolor="#2A2E39",
-            zerolinecolor="#2A2E39",
-            tickfont=dict(size=10, color="#D1D4DC")
-        )
+        fig.update_xaxes(range=[atm_strike - 550, atm_strike + 550], tickmode='array', tickvals=df_filtered["Strike"], ticktext=strike_labels, tickangle=-45, gridcolor="#2A2E39", zerolinecolor="#2A2E39", tickfont=dict(size=10, color="#D1D4DC"))
     else:
         fig.update_xaxes(gridcolor="#2A2E39", zerolinecolor="#2A2E39", tickfont=dict(size=10))
-        
     fig.update_yaxes(gridcolor="#2A2E39", zerolinecolor="#2A2E39", tickfont=dict(size=10))
     return fig
 
@@ -193,9 +153,7 @@ def create_h_bar(title, put_val, call_val, interp_text="", interp_color="#8A93A6
     fig.add_trace(go.Bar(x=[call_val], y=[''], name='Call (CE)', orientation='h', marker_color="#00E676", text=f"{call_val:,.0f}", textposition='inside', insidetextanchor='start'))
     fig.update_layout(
         title=dict(text=f"<b>{title}</b><br><span style='color:{interp_color}; font-size:10px; font-weight:700;'>{interp_text}</span>", font=dict(size=11, color="#8A93A6"), x=0.5, xanchor='center'),
-        barmode='group', margin=dict(l=0, r=0, t=35, b=0), height=85,
-        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", showlegend=False,
-        xaxis=dict(visible=False), yaxis=dict(visible=False), bargap=0.2
+        barmode='group', margin=dict(l=0, r=0, t=35, b=0), height=85, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", showlegend=False, xaxis=dict(visible=False), yaxis=dict(visible=False), bargap=0.2
     )
     return fig
 
@@ -225,14 +183,10 @@ def check_and_reset(df_name, cols, today_date_str, now_time_str):
 
 @st.cache_resource
 def start_dhan_websocket(client_id, access_token):
-    ws_data = {
-        "RELIANCE_LTP": 0.0, "RELIANCE_PREV": 0.0, "HDFCBANK_LTP": 0.0, "HDFCBANK_PREV": 0.0,
-        "ICICIBANK_LTP": 0.0, "ICICIBANK_PREV": 0.0, "NIFTY_FUT_LTP": 0.0, "CVD": 0.0, "CONNECTED": False
-    }
-
+    ws_data = {"RELIANCE_LTP": 0.0, "RELIANCE_PREV": 0.0, "HDFCBANK_LTP": 0.0, "HDFCBANK_PREV": 0.0, "ICICIBANK_LTP": 0.0, "ICICIBANK_PREV": 0.0, "NIFTY_FUT_LTP": 0.0, "CVD": 0.0, "CONNECTED": False}
     if not DHAN_WS_AVAILABLE: return ws_data
 
-    CURRENT_NIFTY_FUT_ID = "58756" # Update monthly
+    CURRENT_NIFTY_FUT_ID = "58756" 
     instruments = [(1, "2885"), (1, "1333"), (1, "4963"), (2, CURRENT_NIFTY_FUT_ID)]
     sub_code = getattr(marketfeed, 'Ticker', 15)
 
@@ -254,8 +208,7 @@ def start_dhan_websocket(client_id, access_token):
         if prev_ltp > 0:
             if ltp > prev_ltp: ws_data["CVD"] += ltq
             elif ltp < prev_ltp: ws_data["CVD"] -= ltq
-        ws_data[f"{symbol}_LTP"] = ltp
-        ws_data[f"{symbol}_PREV"] = ltp
+        ws_data[f"{symbol}_LTP"] = ltp; ws_data[f"{symbol}_PREV"] = ltp
 
     def run_ws():
         try:
@@ -272,17 +225,21 @@ live_ws_data = start_dhan_websocket(CLIENT_ID, ACCESS_TOKEN)
 # 4. BLACK-SCHOLES GREEK ENGINE (Nifty Strict Precision)
 # ---------------------------------------------------------
 def calculate_bs_greeks(S, K, T, sigma, r=0.07):
-    if T <= 1e-5 or sigma <= 1e-4 or S <= 0 or K <= 0: return 0.0, 0.0, 0.0, 0.0
+    if T <= 1e-5 or sigma <= 1e-4 or S <= 0 or K <= 0: return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
     try:
         d1 = (math.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
         d2 = d1 - sigma * math.sqrt(T)
         pdf_d1 = (1.0 / math.sqrt(2 * math.pi)) * math.exp(-0.5 * d1 * d1)
+        
+        ce_delta = 0.5 * (1.0 + math.erf(d1 / math.sqrt(2.0)))
+        pe_delta = ce_delta - 1.0
+        
         gamma = pdf_d1 / (S * sigma * math.sqrt(T))
         vanna = -pdf_d1 * d2 / sigma
         charm = -pdf_d1 * (2 * r * math.sqrt(T) - d2 * sigma) / (2 * T * sigma)
         speed = -gamma / S * (1 + d1 / (sigma * math.sqrt(T)))
-        return gamma, vanna, charm, speed
-    except Exception: return 0.0, 0.0, 0.0, 0.0
+        return ce_delta, pe_delta, gamma, vanna, charm, speed
+    except Exception: return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
 
 # ---------------------------------------------------------
 # 5. DATA API ENGINE
@@ -306,16 +263,13 @@ def fetch_gex_option_chain(expiry_date):
                 ce, pe = details.get("ce", {}), details.get("pe", {})
                 
                 ce_oi, pe_oi = float(ce.get("oi", 0)), float(pe.get("oi", 0))
-                ce_oichg = float(ce.get("oi_change", ce.get("change_in_oi", 0)))
-                pe_oichg = float(pe.get("oi_change", pe.get("change_in_oi", 0)))
+                ce_oichg, pe_oichg = float(ce.get("oi_change", ce.get("change_in_oi", 0))), float(pe.get("oi_change", pe.get("change_in_oi", 0)))
                 ce_vol, pe_vol = float(ce.get("volume") or 0.0), float(pe.get("volume") or 0.0)
                 ce_ltp, pe_ltp = float(ce.get("last_price", 0)), float(pe.get("last_price", 0))
                 ce_iv, pe_iv = float(ce.get("implied_volatility", 0))/100.0, float(pe.get("implied_volatility", 0))/100.0
-                ce_delta, pe_delta = float(ce.get("greeks", {}).get("delta", 0)), float(pe.get("greeks", {}).get("delta", 0))
-                ce_gamma, pe_gamma = float(ce.get("greeks", {}).get("gamma", 0)), float(pe.get("greeks", {}).get("gamma", 0))
 
-                ce_gamma, ce_vanna, ce_charm, ce_speed = calculate_bs_greeks(spot_price, strike, T_years, ce_iv if ce_gamma <= 0 and ce_iv > 0 else max(ce_iv, 0.15))
-                pe_gamma, pe_vanna, pe_charm, pe_speed = calculate_bs_greeks(spot_price, strike, T_years, pe_iv if pe_gamma <= 0 and pe_iv > 0 else max(pe_iv, 0.15))
+                ce_delta, _, ce_gamma, ce_vanna, ce_charm, ce_speed = calculate_bs_greeks(spot_price, strike, T_years, max(ce_iv, 0.01))
+                _, pe_delta, pe_gamma, pe_vanna, pe_charm, pe_speed = calculate_bs_greeks(spot_price, strike, T_years, max(pe_iv, 0.01))
 
                 call_gex = ce_oi * NIFTY_LOT_SIZE * ce_gamma * (spot_price**2) * 0.01 / 1e5
                 put_gex = -pe_oi * NIFTY_LOT_SIZE * pe_gamma * (spot_price**2) * 0.01 / 1e5
@@ -393,7 +347,6 @@ today_date_str, now_time_str = now_ist.strftime("%Y-%m-%d"), now_ist.strftime("%
 m_open, m_close = now_ist.replace(hour=9, minute=15, second=0, microsecond=0), now_ist.replace(hour=15, minute=30, second=0, microsecond=0)
 is_market_live = now_ist.weekday() < 5 and (m_open <= now_ist <= m_close)
 
-# AUTO REFRESH ONLY DURING LIVE MARKET HOURS
 auto_refresh = st.sidebar.checkbox("Live Auto-Refresh (5s)", value=True)
 if auto_refresh and is_market_live:
     st_autorefresh(interval=5000, key="datarefresh")
@@ -415,7 +368,9 @@ strike_m50, strike_p50 = atm_strike - 50, atm_strike + 50
 
 selected_target_strike = st.sidebar.selectbox("🎯 Target Strike", df_oc["Strike"].tolist() if df_oc is not None else [], index=df_oc["Strike"].tolist().index(atm_strike) if df_oc is not None and atm_strike in df_oc["Strike"].tolist() else 0)
 
-# Init Memory DataFrames
+if "chain_snapshots" not in st.session_state: st.session_state["chain_snapshots"] = {}
+if "last_chain_snap_ts" not in st.session_state: st.session_state["last_chain_snap_ts"] = 0
+
 for key, cols in [
     ("oi_snapshots", ["Date", "Timestamp", "Strike", "CE_OI", "PE_OI"]),
     ("iv_spread_history", ["Date", "Time", "Strike", "CE_IV", "PE_IV", "IV_Spread", "Spot"]),
@@ -432,6 +387,8 @@ if "straddle_anchor_price" not in st.session_state: st.session_state["straddle_a
 if st.sidebar.button("🗑️ Reset Session Cache"):
     for key in ["oi_snapshots", "iv_spread_history", "pcr_history", "gex_history", "synth_history", "delta_oi_history", "straddle_history"]:
         st.session_state[key] = pd.DataFrame(columns=st.session_state[key].columns)
+    st.session_state["chain_snapshots"] = {}
+    st.session_state["last_chain_snap_ts"] = 0
     st.session_state["straddle_anchor_price"] = None
     st.cache_data.clear()
     st.rerun()
@@ -449,7 +406,6 @@ elif df_oc is not None and not df_oc.empty:
             gamma_flip_strike = int((df_sorted.iloc[i-1]["Strike"] + df_sorted.iloc[i]["Strike"]) / 2.0)
             break
 
-    # Max Pain Engine
     df_pain, max_pain_strike = pd.DataFrame(), atm_strike
     pain_records = [{"Strike": k, "Writer_Loss": (df_oc["CE_OI"] * (k - df_oc["Strike"]).clip(lower=0)).sum() + (df_oc["PE_OI"] * (df_oc["Strike"] - k).clip(lower=0)).sum()} for k in df_oc["Strike"] if atm_strike - 1500 <= k <= atm_strike + 1500]
     if pain_records:
@@ -460,13 +416,8 @@ elif df_oc is not None and not df_oc.empty:
     target_iv_spread = (target_row["CE_IV"].values[0] if not target_row.empty else 0.0) - (target_row["PE_IV"].values[0] if not target_row.empty else 0.0)
 
     df_filtered = df_oc[(df_oc["Strike"] >= atm_strike - 550) & (df_oc["Strike"] <= atm_strike + 550)].copy()
-    
-    call_wall_gex = df_filtered.loc[df_filtered['Net_GEX'].idxmax()]['Strike'] if not df_filtered.empty else atm_strike
-    put_wall_gex = df_filtered.loc[df_filtered['Net_GEX'].idxmin()]['Strike'] if not df_filtered.empty else atm_strike
-    call_wall_dex = df_filtered.loc[df_filtered['Net_DEX'].idxmax()]['Strike'] if not df_filtered.empty else atm_strike
-    put_wall_dex = df_filtered.loc[df_filtered['Net_DEX'].idxmin()]['Strike'] if not df_filtered.empty else atm_strike
+    strike_labels = df_filtered["Strike"].astype(str).tolist()
 
-    # Process Memory updates ONLY during Live Market
     if is_market_live:
         for key in ["oi_snapshots", "iv_spread_history", "pcr_history", "gex_history", "synth_history", "delta_oi_history", "straddle_history"]:
             if not st.session_state[key].empty and st.session_state[key].iloc[-1]["Date"] != today_date_str:
@@ -474,6 +425,12 @@ elif df_oc is not None and not df_oc.empty:
                 if key == "straddle_history": st.session_state["straddle_anchor_price"] = None
 
         now_ts = int(time.time())
+        if now_ts - st.session_state["last_chain_snap_ts"] >= 300:
+            st.session_state["chain_snapshots"][now_time_str] = df_filtered.to_dict('records')
+            st.session_state["last_chain_snap_ts"] = now_ts
+            if len(st.session_state["chain_snapshots"]) > 80:
+                del st.session_state["chain_snapshots"][next(iter(st.session_state["chain_snapshots"]))]
+
         oi_snap = st.session_state["oi_snapshots"]
         if oi_snap.empty or (now_ts - oi_snap["Timestamp"].max() >= 60):
             new_snap = df_oc[["Strike", "CE_OI", "PE_OI"]].copy()
@@ -515,8 +472,8 @@ elif df_oc is not None and not df_oc.empty:
         doi_df = st.session_state["delta_oi_history"]
         if doi_df.empty or doi_df.iloc[-1]["Time"] != now_time_str:
             d_roc_1m = df_oc["Net_Delta_OI"].sum() - doi_df[doi_df["Timestamp_dt"] <= now_ist - datetime.timedelta(minutes=1)].iloc[-1]["Total_Net_Delta_OI"] if not doi_df[doi_df["Timestamp_dt"] <= now_ist - datetime.timedelta(minutes=1)].empty else 0.0
-            dex_vel = (df_oc["Net_DEX"].sum() / 100.0) - doi_df[doi_df["Timestamp_dt"] <= now_ist - datetime.timedelta(minutes=5)].iloc[-1]["Total_Net_DEX"] if not doi_df[doi_df["Timestamp_dt"] <= now_ist - datetime.timedelta(minutes=5)].empty else 0.0
-            st.session_state["delta_oi_history"] = pd.concat([doi_df, pd.DataFrame([{"Date": today_date_str, "Timestamp_dt": now_ist, "Time": now_time_str, "Total_Net_Delta_OI": df_oc["Net_Delta_OI"].sum(), "Delta_OI_ROC_1m": d_roc_1m, "Total_Net_DEX": df_oc["Net_DEX"].sum() / 100.0, "DEX_Vel_5m": dex_vel}])], ignore_index=True)
+            dex_vel = (df_oc["Net_DEX"].sum()) - doi_df[doi_df["Timestamp_dt"] <= now_ist - datetime.timedelta(minutes=5)].iloc[-1]["Total_Net_DEX"] if not doi_df[doi_df["Timestamp_dt"] <= now_ist - datetime.timedelta(minutes=5)].empty else 0.0
+            st.session_state["delta_oi_history"] = pd.concat([doi_df, pd.DataFrame([{"Date": today_date_str, "Timestamp_dt": now_ist, "Time": now_time_str, "Total_Net_Delta_OI": df_oc["Net_Delta_OI"].sum(), "Delta_OI_ROC_1m": d_roc_1m, "Total_Net_DEX": df_oc["Net_DEX"].sum(), "DEX_Vel_5m": dex_vel}])], ignore_index=True)
             save_persisted_df(st.session_state["delta_oi_history"], "delta_oi_history")
 
         strad_df = st.session_state["straddle_history"]
@@ -530,19 +487,28 @@ elif df_oc is not None and not df_oc.empty:
             st.session_state["straddle_history"] = pd.concat([strad_df, pd.DataFrame([{"Date": today_date_str, "Time": now_time_str, "Elapsed_Mins": e_mins, "Actual_Straddle": c_strad, "Expected_Straddle": e_strad, "Regime": regime}])], ignore_index=True)
             save_persisted_df(st.session_state["straddle_history"], "straddle_history")
 
-    # UI State Values
     pcr_df, gex_df, synth_df, doi_df, strad_df = st.session_state["pcr_history"], st.session_state["gex_history"], st.session_state["synth_history"], st.session_state["delta_oi_history"], st.session_state["straddle_history"]
+    
+    intraday_rv = 0.0
+    vrp = 0.0
+    atm_iv = (target_row["CE_IV"].values[0] + target_row["PE_IV"].values[0]) / 2.0 * 100 if not target_row.empty else 0.0
+    if not synth_df.empty and len(synth_df) > 5:
+        spot_series = synth_df["Spot"].astype(float)
+        log_returns = np.log(spot_series / spot_series.shift(1)).dropna()
+        if len(log_returns) > 2: intraday_rv = log_returns.std() * math.sqrt(252 * 75) * 100
+    vrp = atm_iv - intraday_rv
+
+    iivr = 0.0
+    iv_hist = st.session_state["iv_spread_history"]
+    min_iv, max_iv = 0.0, 0.0
+    if not iv_hist.empty:
+        atm_hist = iv_hist[iv_hist["Strike"] == atm_strike]
+        if not atm_hist.empty:
+            mean_iv_series = (atm_hist["CE_IV"] + atm_hist["PE_IV"]) / 2.0 * 100
+            min_iv, max_iv = mean_iv_series.min(), mean_iv_series.max()
+            iivr = ((atm_iv - min_iv) / (max_iv - min_iv)) * 100 if max_iv > min_iv else 50.0
 
     cz_gex = gex_df.iloc[-1]["Z_GEX"] if not gex_df.empty else 0.0
-
-    # Dynamic Interpretations Logic
-    net_vex_tot = df_filtered["Net_VEX"].sum()
-    if net_vex_tot > 0: vex_interp_str = f"🟢 <b>Live Vanna Signal (+{net_vex_tot:.2f}L):</b> Positive Net Vanna means IV expansion forces dealers to buy futures, dampening downside sell-offs."
-    else: vex_interp_str = f"🔴 <b>Live Vanna Signal ({net_vex_tot:.2f}L):</b> Negative Net Vanna means IV expansion forces dealers to sell futures, accelerating market downturns."
-
-    net_chex_tot = df_filtered["Net_CHEX"].sum()
-    if net_chex_tot > 0: chex_interp_str = f"🟢 <b>Live Charm Signal (+{net_chex_tot:.2f}L):</b> Positive Net Charm indicates theta decay forces dealers to steadily buy futures into 3:30 PM."
-    else: chex_interp_str = f"🔴 <b>Live Charm Signal ({net_chex_tot:.2f}L):</b> Negative Net Charm indicates time decay forces dealers to sell futures as expiry approaches."
 
     # ---------------------------------------------------------
     # 8. DASHBOARD UI RENDERING
@@ -551,38 +517,19 @@ elif df_oc is not None and not df_oc.empty:
     st.markdown(f'<div class="status-badge {"status-live" if is_market_live else "status-closed"}">{"🟢 LIVE MARKET" if is_market_live else "🟠 MARKET CLOSED"} | Expiry: {selected_expiry} | IST: {now_time_str}</div>', unsafe_allow_html=True)
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # --- TOP SUMMARY METRIC CARDS ---
-    m1, m2, m3, m4, m5, m6 = st.columns(6)
-    m1.markdown(f'<div class="metric-card metric-card-amber"><div class="metric-title">NIFTY SYNTH FUT</div><div class="metric-value">₹{synthetic_future:,.2f}</div><div class="metric-sub sub-amber">Spot: ₹{spot_price:,.2f} | Pain: {max_pain_strike}</div></div>', unsafe_allow_html=True)
-    
-    spread_card = "metric-card-green" if target_iv_spread >= 0 else "metric-card-red"
-    spread_sub = "sub-green" if target_iv_spread >= 0 else "sub-red"
-    ce_iv_val = (target_row["CE_IV"].values[0]*100) if not target_row.empty else 0.0
-    pe_iv_val = (target_row["PE_IV"].values[0]*100) if not target_row.empty else 0.0
-    m2.markdown(f'<div class="metric-card {spread_card}"><div class="metric-title">{selected_target_strike} IV SPREAD</div><div class="metric-value">{target_iv_spread:+.2f}%</div><div class="metric-sub {spread_sub}">CE {ce_iv_val:.1f}% | PE {pe_iv_val:.1f}%</div></div>', unsafe_allow_html=True)
-    
+    n1, n2, n3, n4 = st.columns(4)
+    n1.markdown(f'<div class="metric-card metric-card-amber"><div class="metric-title">NIFTY SYNTH FUT</div><div class="metric-value">₹{synthetic_future:,.2f}</div><div class="metric-sub sub-amber">Spot: ₹{spot_price:,.2f} | Pain: {max_pain_strike}</div></div>', unsafe_allow_html=True)
+    n2.markdown(f'<div class="metric-card {"metric-card-green" if target_iv_spread >= 0 else "metric-card-red"}"><div class="metric-title">{selected_target_strike} IV SPREAD</div><div class="metric-value">{target_iv_spread:+.2f}%</div><div class="metric-sub {"sub-green" if target_iv_spread >= 0 else "sub-red"}">CE {(target_row["CE_IV"].values[0]*100) if not target_row.empty else 0:.1f}% | PE {(target_row["PE_IV"].values[0]*100) if not target_row.empty else 0:.1f}%</div></div>', unsafe_allow_html=True)
     dp_15m = pcr_df.iloc[-1]["Delta_PCR_15m"] if not pcr_df.empty else 0.0
-    pcr_card = "metric-card-green" if dp_15m >= 0.15 else ("metric-card-red" if dp_15m <= -0.15 else "metric-card-amber")
-    pcr_sub = "sub-green" if dp_15m >= 0.15 else ("sub-red" if dp_15m <= -0.15 else "sub-amber")
-    pcr_val = pcr_df.iloc[-1]["PCR"] if not pcr_df.empty else 0.0
-    m3.markdown(f'<div class="metric-card {pcr_card}"><div class="metric-title">ΔPCR 15M VELOCITY</div><div class="metric-value">{dp_15m:+.2f}</div><div class="metric-sub {pcr_sub}">PCR: {pcr_val:.2f}</div></div>', unsafe_allow_html=True)
-    
-    t_net_doi = df_oc["Net_Delta_OI"].sum()
-    doi_roc_1m = doi_df.iloc[-1]["Delta_OI_ROC_1m"] if not doi_df.empty else 0.0
-    doi_card = "metric-card-green" if t_net_doi >= 0 else "metric-card-red"
-    doi_sub = "sub-green" if doi_roc_1m >= 0 else "sub-red"
-    m4.markdown(f'<div class="metric-card {doi_card}"><div class="metric-title">NET DELTA OI</div><div class="metric-value">{t_net_doi:+,.0f}</div><div class="metric-sub {doi_sub}">1m ROC: {doi_roc_1m:+,.0f}</div></div>', unsafe_allow_html=True)
-    
+    n3.markdown(f'<div class="metric-card {"metric-card-green" if dp_15m >= 0.15 else ("metric-card-red" if dp_15m <= -0.15 else "metric-card-amber")}"><div class="metric-title">ΔPCR 15M VELOCITY</div><div class="metric-value">{dp_15m:+.2f}</div><div class="metric-sub {"sub-green" if dp_15m >= 0.15 else ("sub-red" if dp_15m <= -0.15 else "sub-amber")}">PCR: {pcr_df.iloc[-1]["PCR"] if not pcr_df.empty else 0:.2f}</div></div>', unsafe_allow_html=True)
+    n4.markdown(f'<div class="metric-card {"metric-card-green" if df_oc["Net_Delta_OI"].sum() >= 0 else "metric-card-red"}"><div class="metric-title">NET DELTA OI</div><div class="metric-value">{df_oc["Net_Delta_OI"].sum():+,.0f}</div><div class="metric-sub {"sub-green" if (doi_df.iloc[-1]["Delta_OI_ROC_1m"] if not doi_df.empty else 0) >= 0 else "sub-red"}">1m ROC: {doi_df.iloc[-1]["Delta_OI_ROC_1m"] if not doi_df.empty else 0:+,.0f}</div></div>', unsafe_allow_html=True)
+
+    m1, m2, m3, m4 = st.columns(4)
     strad_reg = strad_df.iloc[-1]["Regime"] if not strad_df.empty else "NORMAL"
-    strad_val = strad_df.iloc[-1]["Actual_Straddle"] if not strad_df.empty else 0.0
-    strad_card = "metric-card-green" if "COIL" in strad_reg else "metric-card-amber"
-    strad_sub = "sub-green" if "COIL" in strad_reg else "sub-amber"
-    m5.markdown(f'<div class="metric-card {strad_card}"><div class="metric-title">STRADDLE DECAY</div><div class="metric-value">₹{strad_val:.1f}</div><div class="metric-sub {strad_sub}">{strad_reg}</div></div>', unsafe_allow_html=True)
-    
-    z_card = "metric-card-red" if cz_gex < -2.0 else ("metric-card-green" if -1.0 <= cz_gex <= 1.0 else "metric-card-amber")
-    z_sub = "sub-red" if cz_gex < -2.0 else ("sub-green" if -1.0 <= cz_gex <= 1.0 else "sub-amber")
-    z_sig_text = "GAMMA COLLAPSE" if cz_gex < -2.0 else ("NORMAL DAMPENING" if -1.0 <= cz_gex <= 1.0 else "TRANSITION ZONE")
-    m6.markdown(f'<div class="metric-card {z_card}"><div class="metric-title">Z-GEX SCORE</div><div class="metric-value">{cz_gex:+.2f}</div><div class="metric-sub {z_sub}">{z_sig_text}</div></div>', unsafe_allow_html=True)
+    m1.markdown(f'<div class="metric-card {"metric-card-green" if "COIL" in strad_reg else "metric-card-amber"}"><div class="metric-title">STRADDLE DECAY</div><div class="metric-value">₹{strad_df.iloc[-1]["Actual_Straddle"] if not strad_df.empty else 0:.1f}</div><div class="metric-sub {"sub-green" if "COIL" in strad_reg else "sub-amber"}">{strad_reg}</div></div>', unsafe_allow_html=True)
+    m2.markdown(f'<div class="metric-card {"metric-card-red" if cz_gex < -2.0 else ("metric-card-green" if -1.0 <= cz_gex <= 1.0 else "metric-card-amber")}"><div class="metric-title">Z-GEX SCORE</div><div class="metric-value">{cz_gex:+.2f}</div><div class="metric-sub {"sub-red" if cz_gex < -2.0 else ("sub-green" if -1.0 <= cz_gex <= 1.0 else "sub-amber")}">{"GAMMA COLLAPSE" if cz_gex < -2.0 else ("NORMAL DAMPENING" if -1.0 <= cz_gex <= 1.0 else "TRANSITION ZONE")}</div></div>', unsafe_allow_html=True)
+    m3.markdown(f'<div class="metric-card {"metric-card-red" if vrp < 0 else "metric-card-green"}"><div class="info-tooltip">ⓘ<span class="tooltip-text">Variance Risk Premium (IV - Intraday Realized Vol). Positive = Options are overpriced (Edge for Sellers). Negative = Options underpricing risk (Edge for Buyers).</span></div><div class="metric-title">VARIANCE RISK PREM (VRP)</div><div class="metric-value">{vrp:+.2f}%</div><div class="metric-sub {"sub-red" if vrp < 0 else "sub-green"}">IV: {atm_iv:.1f}% | RV: {intraday_rv:.1f}%</div></div>', unsafe_allow_html=True)
+    m4.markdown(f'<div class="metric-card {"metric-card-red" if iivr > 70 else ("metric-card-green" if iivr < 30 else "metric-card-amber")}"><div class="info-tooltip">ⓘ<span class="tooltip-text">Session IV Rank. >70 indicates intraday vol is peaking (mean-reversion likely). <30 indicates vol is compressed (expansion likely).</span></div><div class="metric-title">SESSION IV RANK (IIVR)</div><div class="metric-value">{iivr:.0f}</div><div class="metric-sub {"sub-red" if iivr > 70 else ("sub-green" if iivr < 30 else "sub-amber")}">High: {max_iv:.1f}% | Low: {min_iv:.1f}%</div></div>', unsafe_allow_html=True)
 
     # --- HORIZONTAL AGGREGATE METRICS WITH DYNAMIC SENTIMENT INTERPRETATIONS ---
     st.markdown('<div class="chart-title" style="margin-top:10px;">Aggregate Options Flow (Total PE vs CE)</div>', unsafe_allow_html=True)
@@ -683,6 +630,21 @@ elif df_oc is not None and not df_oc.empty:
             st.markdown('</div>', unsafe_allow_html=True)
 
     with tab2: # GREEK EXPOSURES
+        st.markdown('<div class="chart-container" style="padding-bottom: 5px;"><div class="chart-title" style="margin-bottom: 5px; border-bottom: none;">⏪ Intraday Profile Replay (DEX / GEX)</div>', unsafe_allow_html=True)
+        timestamps = list(st.session_state.get("chain_snapshots", {}).keys())
+        if len(timestamps) > 0:
+            replay_time = st.select_slider("Select Session Timestamp:", options=timestamps, value=timestamps[-1], label_visibility="collapsed")
+            replay_df = pd.DataFrame(st.session_state["chain_snapshots"][replay_time])
+        else:
+            replay_df = df_filtered
+            st.caption("Collecting snapshots... Replay will populate soon.")
+        st.markdown('</div>', unsafe_allow_html=True)
+        
+        rcall_wall_gex = replay_df.loc[replay_df['Net_GEX'].idxmax()]['Strike'] if not replay_df.empty else atm_strike
+        rput_wall_gex = replay_df.loc[replay_df['Net_GEX'].idxmin()]['Strike'] if not replay_df.empty else atm_strike
+        rcall_wall_dex = replay_df.loc[replay_df['Net_DEX'].idxmax()]['Strike'] if not replay_df.empty else atm_strike
+        rput_wall_dex = replay_df.loc[replay_df['Net_DEX'].idxmin()]['Strike'] if not replay_df.empty else atm_strike
+
         oi_col1, oi_col2 = st.columns(2)
         with oi_col1:
             st.markdown('<div class="chart-container"><div class="chart-title">OI Tracker (CE/PE Profile)</div>', unsafe_allow_html=True)
@@ -726,45 +688,57 @@ elif df_oc is not None and not df_oc.empty:
         e1, e2 = st.columns(2)
         with e1:
             st.markdown('<div class="chart-container"><div class="chart-title">Net Delta Exposure (DEX) By Strike</div>', unsafe_allow_html=True)
+            dex_tot = replay_df['Net_DEX'].sum() if not replay_df.empty else 0
+            dex_interp_str = f"🟢 <b>Live Delta Bias ({dex_tot:+.1f}L):</b> Market Makers are Long Delta. They will sell underlying to hedge down-moves (Support)." if dex_tot > 0 else f"🔴 <b>Live Delta Bias ({dex_tot:+.1f}L):</b> Market Makers are Short Delta. They will buy underlying to hedge up-moves (Resistance)."
+            st.markdown(f'<div class="interp-box">{dex_interp_str}</div>', unsafe_allow_html=True)
+            
             fig_dex = go.Figure()
-            fig_dex.add_trace(go.Bar(x=df_filtered["Strike"], y=df_filtered["Net_DEX"], marker_color=["#00E676" if val >= 0 else "#FF5252" for val in df_filtered["Net_DEX"]], name="Net DEX", opacity=0.75))
-            fig_dex.add_trace(go.Scatter(x=df_filtered["Strike"], y=df_filtered["ABS_DEX"], mode="lines", name="Absolute DEX", line=dict(color="#FFA726", width=2, shape="spline", smoothing=1.3)))
-            y_max_dex = max(df_filtered["ABS_DEX"].max() if not df_filtered.empty else 1, df_filtered["Net_DEX"].max() if not df_filtered.empty else 1) * 1.1
+            fig_dex.add_trace(go.Bar(x=replay_df["Strike"], y=replay_df["Net_DEX"], marker_color=["#00E676" if val >= 0 else "#FF5252" for val in replay_df["Net_DEX"]], name="Net DEX", opacity=0.75))
+            fig_dex.add_trace(go.Scatter(x=replay_df["Strike"], y=replay_df["ABS_DEX"], mode="lines", name="Absolute DEX", line=dict(color="#FFA726", width=2, shape="spline", smoothing=1.3)))
+            y_max_dex = max(replay_df["ABS_DEX"].max() if not replay_df.empty else 1, replay_df["Net_DEX"].max() if not replay_df.empty else 1) * 1.1
             fig_dex.add_vline(x=spot_price, line_dash="solid", line_color="#FFD700"); fig_dex.add_annotation(x=spot_price, y=y_max_dex*0.95, text=f"Spot: {spot_price:.1f}", showarrow=False, font=dict(color="#FFD700", size=9))
-            fig_dex.add_vline(x=call_wall_dex, line_dash="dash", line_color="#00E676"); fig_dex.add_annotation(x=call_wall_dex, y=y_max_dex*0.85, text=f"Call Wall: {call_wall_dex}", showarrow=False, font=dict(color="#00E676", size=9))
-            fig_dex.add_vline(x=put_wall_dex, line_dash="dash", line_color="#FF5252"); fig_dex.add_annotation(x=put_wall_dex, y=y_max_dex*0.75, text=f"Put Wall: {put_wall_dex}", showarrow=False, font=dict(color="#FF5252", size=9))
-            st.plotly_chart(apply_dark_layout(fig_dex, 350, True, df_filtered, atm_strike), use_container_width=True, key="c_dex")
+            fig_dex.add_vline(x=rcall_wall_dex, line_dash="dash", line_color="#00E676"); fig_dex.add_annotation(x=rcall_wall_dex, y=y_max_dex*0.85, text=f"Call Wall: {rcall_wall_dex}", showarrow=False, font=dict(color="#00E676", size=9))
+            fig_dex.add_vline(x=rput_wall_dex, line_dash="dash", line_color="#FF5252"); fig_dex.add_annotation(x=rput_wall_dex, y=y_max_dex*0.75, text=f"Put Wall: {rput_wall_dex}", showarrow=False, font=dict(color="#FF5252", size=9))
+            st.plotly_chart(apply_dark_layout(fig_dex, 350, True, replay_df, atm_strike), use_container_width=True, key="c_dex")
             st.markdown('</div>', unsafe_allow_html=True)
         with e2:
             st.markdown('<div class="chart-container"><div class="chart-title">Net Gamma Exposure (GEX) By Strike</div>', unsafe_allow_html=True)
+            gex_tot = replay_df['Net_GEX'].sum() if not replay_df.empty else 0
+            gex_interp_str = f"🟢 <b>Live Gamma Regime ({gex_tot:+.1f}L):</b> Market Makers are Long Gamma. They buy dips and sell rips (Volatility Dampening)." if gex_tot > 0 else f"🔴 <b>Live Gamma Regime ({gex_tot:+.1f}L):</b> Market Makers are Short Gamma. They sell dips and buy rips (Volatility Accelerating)."
+            st.markdown(f'<div class="interp-box">{gex_interp_str}</div>', unsafe_allow_html=True)
+
             fig_gex = go.Figure()
-            fig_gex.add_trace(go.Bar(x=df_filtered["Strike"], y=df_filtered["Net_GEX"], marker_color=["#00E676" if g >= 0 else "#FF5252" for g in df_filtered["Net_GEX"]], name="Net GEX", opacity=0.75))
-            fig_gex.add_trace(go.Scatter(x=df_filtered["Strike"], y=df_filtered["ABS_GEX"], mode="lines", name="Absolute GEX", line=dict(color="#29B6F6", width=2, shape="spline", smoothing=1.3)))
-            y_max_gex = max(df_filtered["ABS_GEX"].max() if not df_filtered.empty else 1, df_filtered["Net_GEX"].max() if not df_filtered.empty else 1) * 1.1
+            fig_gex.add_trace(go.Bar(x=replay_df["Strike"], y=replay_df["Net_GEX"], marker_color=["#00E676" if g >= 0 else "#FF5252" for g in replay_df["Net_GEX"]], name="Net GEX", opacity=0.75))
+            fig_gex.add_trace(go.Scatter(x=replay_df["Strike"], y=replay_df["ABS_GEX"], mode="lines", name="Absolute GEX", line=dict(color="#29B6F6", width=2, shape="spline", smoothing=1.3)))
+            y_max_gex = max(replay_df["ABS_GEX"].max() if not replay_df.empty else 1, replay_df["Net_GEX"].max() if not replay_df.empty else 1) * 1.1
             fig_gex.add_vline(x=spot_price, line_dash="solid", line_color="#FFD700"); fig_gex.add_annotation(x=spot_price, y=y_max_gex*0.95, text=f"Spot: {spot_price:.1f}", showarrow=False, font=dict(color="#FFD700", size=9))
             fig_gex.add_vline(x=gamma_flip_strike, line_dash="dash", line_color="#29B6F6"); fig_gex.add_annotation(x=gamma_flip_strike, y=y_max_gex*0.85, text=f"Flip: {gamma_flip_strike}", showarrow=False, font=dict(color="#29B6F6", size=9))
             fig_gex.add_vline(x=max_pain_strike, line_dash="dash", line_color="#FFD700"); fig_gex.add_annotation(x=max_pain_strike, y=y_max_gex*0.75, text=f"Max Pain: {max_pain_strike}", showarrow=False, font=dict(color="#FFD700", size=9))
-            fig_gex.add_vline(x=call_wall_gex, line_dash="dash", line_color="#00E676"); fig_gex.add_annotation(x=call_wall_gex, y=y_max_gex*0.65, text=f"Call Wall: {call_wall_gex}", showarrow=False, font=dict(color="#00E676", size=9))
-            fig_gex.add_vline(x=put_wall_gex, line_dash="dash", line_color="#FF5252"); fig_gex.add_annotation(x=put_wall_gex, y=y_max_gex*0.55, text=f"Put Wall: {put_wall_gex}", showarrow=False, font=dict(color="#FF5252", size=9))
-            st.plotly_chart(apply_dark_layout(fig_gex, 350, True, df_filtered, atm_strike), use_container_width=True, key="c_gex")
+            fig_gex.add_vline(x=rcall_wall_gex, line_dash="dash", line_color="#00E676"); fig_gex.add_annotation(x=rcall_wall_gex, y=y_max_gex*0.65, text=f"Call Wall: {rcall_wall_gex}", showarrow=False, font=dict(color="#00E676", size=9))
+            fig_gex.add_vline(x=rput_wall_gex, line_dash="dash", line_color="#FF5252"); fig_gex.add_annotation(x=rput_wall_gex, y=y_max_gex*0.55, text=f"Put Wall: {rput_wall_gex}", showarrow=False, font=dict(color="#FF5252", size=9))
+            st.plotly_chart(apply_dark_layout(fig_gex, 350, True, replay_df, atm_strike), use_container_width=True, key="c_gex")
             st.markdown('</div>', unsafe_allow_html=True)
 
         e3, e4 = st.columns(2)
         with e3:
             st.markdown('<div class="chart-container"><div class="chart-title">Tradytics Vanna Exposure (VEX)</div>', unsafe_allow_html=True)
+            net_vex_tot = df_filtered["Net_VEX"].sum()
+            vex_interp_str = f"🟢 <b>Live Vanna Signal (+{net_vex_tot:.2f}L):</b> Positive Net Vanna means IV expansion forces dealers to buy futures, dampening downside sell-offs." if net_vex_tot > 0 else f"🔴 <b>Live Vanna Signal ({net_vex_tot:.2f}L):</b> Negative Net Vanna means IV expansion forces dealers to sell futures, accelerating market downturns."
             st.markdown(f'<div class="interp-box">{vex_interp_str}</div>', unsafe_allow_html=True)
             fig_vex = go.Figure()
-            fig_vex.add_trace(go.Bar(x=df_filtered["Strike"], y=df_filtered["PE_VEX"], name="Put VEX", marker_color="#FF5252"))
-            fig_vex.add_trace(go.Bar(x=df_filtered["Strike"], y=df_filtered["CE_VEX"], name="Call VEX", marker_color="#00E676"))
+            fig_vex.add_trace(go.Bar(x=df_filtered["Strike"], y=df_filtered["PE_VEX"], name="Put VEX (PE)", marker_color="#FF5252"))
+            fig_vex.add_trace(go.Bar(x=df_filtered["Strike"], y=df_filtered["CE_VEX"], name="Call VEX (CE)", marker_color="#00E676"))
             fig_vex.update_layout(barmode='group')
             st.plotly_chart(apply_dark_layout(fig_vex, 250, True, df_filtered, atm_strike), use_container_width=True, key="c_vex")
             st.markdown('</div>', unsafe_allow_html=True)
         with e4:
             st.markdown('<div class="chart-container"><div class="chart-title">Tradytics Charm Exposure (CHEX)</div>', unsafe_allow_html=True)
+            net_chex_tot = df_filtered["Net_CHEX"].sum()
+            chex_interp_str = f"🟢 <b>Live Charm Signal (+{net_chex_tot:.2f}L):</b> Positive Net Charm indicates time decay forces dealers to steadily buy futures (Bullish drift)." if net_chex_tot > 0 else f"🔴 <b>Live Charm Signal ({net_chex_tot:.2f}L):</b> Negative Net Charm indicates time decay forces dealers to sell futures (Bearish drift)."
             st.markdown(f'<div class="interp-box">{chex_interp_str}</div>', unsafe_allow_html=True)
             fig_chex = go.Figure()
-            fig_chex.add_trace(go.Bar(x=df_filtered["Strike"], y=df_filtered["PE_CHEX"], name="Put CHEX", marker_color="#FF5252"))
-            fig_chex.add_trace(go.Bar(x=df_filtered["Strike"], y=df_filtered["CE_CHEX"], name="Call CHEX", marker_color="#00E676"))
+            fig_chex.add_trace(go.Bar(x=df_filtered["Strike"], y=df_filtered["PE_CHEX"], name="Put CHEX (PE)", marker_color="#FF5252"))
+            fig_chex.add_trace(go.Bar(x=df_filtered["Strike"], y=df_filtered["CE_CHEX"], name="Call CHEX (CE)", marker_color="#00E676"))
             fig_chex.update_layout(barmode='group')
             st.plotly_chart(apply_dark_layout(fig_chex, 250, True, df_filtered, atm_strike), use_container_width=True, key="c_chex")
             st.markdown('</div>', unsafe_allow_html=True)
@@ -865,7 +839,7 @@ elif df_oc is not None and not df_oc.empty:
             
         with v4:
             st.markdown('<div class="chart-container"><div class="chart-title">OpenBull 3D Volatility Surface</div>', unsafe_allow_html=True)
-            st.markdown('<div class="interp-box">💡 <b>3D Vol Skew Surface:</b> Visualizes IV across Strike (X) and Days (Y). Humps indicate localized options demand.</div>', unsafe_allow_html=True)
+            st.markdown('<div class="interp-box">💡 <b>3D Vol Skew Surface:</b> Visualizes IV across Strike (X) and Days (Y). Peaks indicate localized options demand.</div>', unsafe_allow_html=True)
             if not df_surface.empty:
                 pivot_surface = df_surface.pivot_table(index='Days', columns='Strike', values='IV', aggfunc='mean').ffill(axis=1).bfill(axis=1).fillna(0)
                 fig_surf = go.Figure(data=[go.Surface(z=pivot_surface.values, x=pivot_surface.columns.tolist(), y=pivot_surface.index.tolist(), colorscale='Viridis', showscale=False)])
