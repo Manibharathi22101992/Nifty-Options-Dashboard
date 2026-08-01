@@ -198,7 +198,6 @@ def start_dhan_websocket(client_id, access_token):
         (2, CURRENT_NIFTY_FUT_ID)
     ]
 
-    # Fetch correct Ticker constant or fallback to 15 (which is the default Ticker code)
     sub_code = getattr(marketfeed, 'Ticker', 15)
 
     def on_connect(instance): ws_data["CONNECTED"] = True
@@ -466,6 +465,19 @@ elif df_oc is not None and not df_oc.empty:
             gamma_flip_strike = int((df_sorted.iloc[i - 1]["Strike"] + df_sorted.iloc[i]["Strike"]) / 2.0)
             break
 
+    # OPENBULL ALGO: MAX PAIN CALCULATION
+    max_pain_strike = atm_strike
+    df_pain = pd.DataFrame()
+    pain_records = []
+    # Calculate Max Pain strictly within reasonable range to save computation
+    for k_eval in df_oc["Strike"]:
+        if atm_strike - 1500 <= k_eval <= atm_strike + 1500:
+            loss = (df_oc["CE_OI"] * (k_eval - df_oc["Strike"]).clip(lower=0)).sum() + (df_oc["PE_OI"] * (df_oc["Strike"] - k_eval).clip(lower=0)).sum()
+            pain_records.append({"Strike": k_eval, "Writer_Loss": loss})
+    if pain_records:
+        df_pain = pd.DataFrame(pain_records)
+        max_pain_strike = df_pain.loc[df_pain["Writer_Loss"].idxmin()]["Strike"]
+
     target_row = df_oc[df_oc["Strike"] == selected_target_strike]
     target_ce_iv = target_row["CE_IV"].values[0] if not target_row.empty else 0.0
     target_pe_iv = target_row["PE_IV"].values[0] if not target_row.empty else 0.0
@@ -477,6 +489,16 @@ elif df_oc is not None and not df_oc.empty:
     total_net_gex = df_oc["Net_GEX"].sum()
     total_net_delta_oi = df_oc["Net_Delta_OI"].sum()
     total_net_dex_crores = df_oc["Net_DEX"].sum() / 100.0
+
+    # ---------------------------------------------------------
+    # SMART MEMORY RESET: Keep yesterday's data UNTIL exactly 09:15 AM
+    # ---------------------------------------------------------
+    if is_market_live:
+        for hist_key in ["iv_spread_history", "pcr_history", "gex_history", "synth_history", "delta_oi_history", "straddle_history"]:
+            h_df = st.session_state[hist_key]
+            if not h_df.empty and h_df.iloc[-1].get("Date") != today_date_str:
+                st.session_state[hist_key] = h_df.iloc[0:0] # Reset strictly at open
+                if hist_key == "straddle_history": st.session_state["straddle_anchor_price"] = None
 
     # STRICT INTRADAY TICK RECORDING TO PARQUET (Only during live session)
     if is_market_live:
@@ -606,10 +628,10 @@ elif df_oc is not None and not df_oc.empty:
     with m1:
         st.markdown(f"""
             <div class="metric-card metric-card-amber">
-                <div class="info-tooltip">ⓘ<span class="tooltip-text">Calculated Synthetic Future (K + C - P) for the selected expiry. All analytics dynamically center on this True Forward Price.</span></div>
+                <div class="info-tooltip">ⓘ<span class="tooltip-text">Calculated Synthetic Future (K + C - P) for the selected expiry. All analytics dynamically center on this True Forward Price. Max Pain indicates institutional strike magnet.</span></div>
                 <div class="metric-title">NIFTY SYNTH FUT</div>
                 <div class="metric-value">₹{synthetic_future:,.2f}</div>
-                <div class="metric-sub sub-amber">Spot: ₹{spot_price:,.2f} | ATM: {atm_strike}</div>
+                <div class="metric-sub sub-amber">Spot: ₹{spot_price:,.2f} | Pain: {max_pain_strike}</div>
             </div>
         """, unsafe_allow_html=True)
 
@@ -880,7 +902,36 @@ elif df_oc is not None and not df_oc.empty:
             st.info("Loading 4 expiries to build vol curve... (Takes ~5 seconds due to API limits)")
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # ================= ROW 10: WEBSOCKET HEAVYWEIGHT BASKET =================
+    # ================= ROW 10: OPENBULL OPTIONS ANALYTICS (IV SMILE & MAX PAIN) =================
+    r10_col1, r10_col2 = st.columns(2)
+    
+    with r10_col1:
+        st.markdown('<div class="chart-container"><div class="info-tooltip">ⓘ<span class="tooltip-text"><b>IV Smile (Volatility Skew):</b> Shows Call vs Put Implied Volatility across strikes. An asymmetric smile indicates institutional demand for specific OTM protections (skew).</span></div><div class="chart-title">IV Smile (Volatility Skew Profile)</div>', unsafe_allow_html=True)
+        fig_smile = go.Figure()
+        fig_smile.add_trace(go.Scatter(x=df_filtered["Strike"], y=df_filtered["CE_IV"], mode="lines+markers", name="Call IV", line=dict(color="#00E676", width=2)))
+        fig_smile.add_trace(go.Scatter(x=df_filtered["Strike"], y=df_filtered["PE_IV"], mode="lines+markers", name="Put IV", line=dict(color="#FF5252", width=2)))
+        fig_smile.add_vline(x=spot_price, line_dash="solid", line_color="#FFD700")
+        fig_smile.add_annotation(x=spot_price, y=0.95, yref="paper", text="Spot", showarrow=False, font=dict(color="#FFD700", size=10), xanchor="left")
+        fig_smile.update_xaxes(range=[atm_strike - 550, atm_strike + 550], tickmode='array', tickvals=df_filtered["Strike"], ticktext=strike_labels, tickangle=-45, gridcolor="#2A2E39")
+        fig_smile.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", margin=dict(l=0, r=0, t=10, b=0), height=250, legend=dict(orientation="h", y=1.1))
+        st.plotly_chart(fig_smile, use_container_width=True, key="chart_iv_smile")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with r10_col2:
+        st.markdown('<div class="chart-container"><div class="info-tooltip">ⓘ<span class="tooltip-text"><b>Max Pain Point:</b> The strike price where option buyers suffer the most intrinsic loss. Serves as a massive institutional magnetic pin on expiry day.</span></div><div class="chart-title">Max Pain Pinning Profile</div>', unsafe_allow_html=True)
+        fig_pain = go.Figure()
+        if not df_pain.empty:
+            fig_pain.add_trace(go.Bar(x=df_pain["Strike"], y=df_pain["Writer_Loss"], marker_color="#8A93A6", name="Option Writer Loss"))
+            fig_pain.add_vline(x=spot_price, line_dash="solid", line_color="#FFD700")
+            fig_pain.add_annotation(x=spot_price, y=0.95, yref="paper", text="Spot", showarrow=False, font=dict(color="#FFD700", size=10), xanchor="left")
+            fig_pain.add_vline(x=max_pain_strike, line_dash="dash", line_color="#29B6F6")
+            fig_pain.add_annotation(x=max_pain_strike, y=0.85, yref="paper", text=f"Max Pain: {max_pain_strike}", showarrow=False, font=dict(color="#29B6F6", size=10), xanchor="left")
+        fig_pain.update_xaxes(range=[atm_strike - 550, atm_strike + 550], tickmode='array', tickvals=df_filtered["Strike"], ticktext=strike_labels, tickangle=-45, gridcolor="#2A2E39")
+        fig_pain.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", margin=dict(l=0, r=0, t=10, b=0), height=250)
+        st.plotly_chart(fig_pain, use_container_width=True, key="chart_max_pain")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    # ================= ROW 11: WEBSOCKET HEAVYWEIGHT BASKET =================
     st.markdown('<div class="chart-container"><div class="info-tooltip">ⓘ<span class="tooltip-text">Tracks the Basis (Futures - Spot) and the Cumulative Volume Delta of top index heavyweights via WebSocket. Validates the structural strength of breakouts.</span></div><div class="chart-title">Futures Basis & Heavyweight CVD Filter (Live WebSocket)</div>', unsafe_allow_html=True)
     
     nifty_fut = live_ws_data.get("NIFTY_FUT_LTP", 0.0)
@@ -918,7 +969,7 @@ elif df_oc is not None and not df_oc.empty:
         
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # ================= ROW 11: INSTITUTIONAL PLAYBOOK EXPANDER =================
+    # ================= ROW 12: INSTITUTIONAL PLAYBOOK EXPANDER =================
     with st.expander("📖 Institutional Playbook: How to Trade Nifty Using Relative Option Demand", expanded=False):
         st.markdown("""
             Monitoring the **ATM IV Spread (IV_Call - IV_Put)** provides major advantages for intraday buyers:
@@ -980,7 +1031,7 @@ elif df_oc is not None and not df_oc.empty:
             </div>
         """, unsafe_allow_html=True)
 
-    # ================= ROW 12: DATA GRID =================
+    # ================= ROW 13: DATA GRID =================
     st.markdown('<div class="chart-container"><div class="chart-title">Institutional Options Chain Grid</div>', unsafe_allow_html=True)
     grid_df = df_filtered[["Strike", "CE_LTP", "PE_LTP", "CE_OI", "PE_OI", "CE_Delta", "PE_Delta", "Net_Delta_OI", "Net_DEX", "Net_GEX", "Net_VEX", "Net_CHEX", "Net_SPEX", "CE_IV", "PE_IV", "IV_Spread"]].copy()
     st.dataframe(
