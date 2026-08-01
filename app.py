@@ -906,7 +906,7 @@ elif df_oc is not None and not df_oc.empty:
     r10_col1, r10_col2 = st.columns(2)
     
     with r10_col1:
-        st.markdown('<div class="chart-container"><div class="info-tooltip">ⓘ<span class="tooltip-text"><b>IV Smile (Volatility Skew):</b> Shows Call vs Put Implied Volatility across strikes. An asymmetric smile indicates institutional demand for specific OTM protections (skew).</span></div><div class="chart-title">IV Smile (Volatility Skew Profile)</div>', unsafe_allow_html=True)
+        st.markdown('<div class="chart-container"><div class="info-tooltip">ⓘ<span class="tooltip-text"><b>IV Smile (Volatility Skew):</b> Shows Call vs Put Implied Volatility across strikes. An asymmetric smile indicates institutional demand for specific OTM protections (skew).</span></div><div class="chart-title">OpenBull IV Smile (Volatility Skew Profile)</div>', unsafe_allow_html=True)
         fig_smile = go.Figure()
         fig_smile.add_trace(go.Scatter(x=df_filtered["Strike"], y=df_filtered["CE_IV"], mode="lines+markers", name="Call IV", line=dict(color="#00E676", width=2)))
         fig_smile.add_trace(go.Scatter(x=df_filtered["Strike"], y=df_filtered["PE_IV"], mode="lines+markers", name="Put IV", line=dict(color="#FF5252", width=2)))
@@ -918,7 +918,7 @@ elif df_oc is not None and not df_oc.empty:
         st.markdown('</div>', unsafe_allow_html=True)
 
     with r10_col2:
-        st.markdown('<div class="chart-container"><div class="info-tooltip">ⓘ<span class="tooltip-text"><b>Max Pain Point:</b> The strike price where option buyers suffer the most intrinsic loss. Serves as a massive institutional magnetic pin on expiry day.</span></div><div class="chart-title">Max Pain Pinning Profile</div>', unsafe_allow_html=True)
+        st.markdown('<div class="chart-container"><div class="info-tooltip">ⓘ<span class="tooltip-text"><b>Max Pain Point:</b> The strike price where option buyers suffer the most intrinsic loss. Serves as a massive institutional magnetic pin on expiry day.</span></div><div class="chart-title">OpenBull Max Pain Pinning Profile</div>', unsafe_allow_html=True)
         fig_pain = go.Figure()
         if not df_pain.empty:
             fig_pain.add_trace(go.Bar(x=df_pain["Strike"], y=df_pain["Writer_Loss"], marker_color="#8A93A6", name="Option Writer Loss"))
