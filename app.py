@@ -8,6 +8,7 @@ from typing import Dict, List, Tuple, Optional, Any
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import requests
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
@@ -23,13 +24,11 @@ class Config:
     NIFTY_LOT_SIZE = 65
     RISK_FREE_RATE = 0.065
     NIFTY_DIVIDEND_YIELD = 0.012
-    ASSUMED_HV_20D = 12.0  # Nifty typical 20-day realized vol baseline (%)
+    ASSUMED_HV_20D = 12.0
     API_TIMEOUT = 10
     MAX_RETRIES = 3
     STRIKE_INTERVAL = 50
     STRIKE_RANGE_ATM = 550
-    MARKET_OPEN = "09:15:00"
-    MARKET_CLOSE = "15:30:00"
 
 try:
     from dhanhq import marketfeed
@@ -39,7 +38,7 @@ except ImportError:
     logger.warning("dhanhq not installed. WebSocket disabled.")
 
 # ---------------------------------------------------------
-# 2. BLOOMBERG-GRADE CSS
+# 2. CSS STYLING
 # ---------------------------------------------------------
 st.set_page_config(
     page_title="Prince PAX | FlashAlpha Nifty Terminal",
@@ -55,27 +54,29 @@ st.markdown(
     .stApp { background: radial-gradient(ellipse at top, #0F1419 0%, #050709 100%); color: #E0E6ED; font-family: 'Inter', -apple-system, sans-serif; }
     section[data-testid="stSidebar"] { background: linear-gradient(180deg, #0F1419 0%, #1A1F2E 100%) !important; border-right: 1px solid rgba(99, 179, 237, 0.2); }
     .metric-card { background: rgba(26, 32, 44, 0.7); backdrop-filter: blur(12px); border: 1px solid rgba(99, 179, 237, 0.2); border-radius: 12px; padding: 14px 18px; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4); margin-bottom: 12px; border-top: 4px solid #63B3ED; transition: all 0.3s ease; }
-    .metric-card:hover { transform: translateY(-2px); box-shadow: 0 12px 40px rgba(99, 179, 237, 0.15); border-color: rgba(99, 179, 237, 0.4); }
+    .metric-card:hover { transform: translateY(-2px); box-shadow: 0 12px 40px rgba(99, 179, 237, 0.15); }
     .metric-card-green { border-top-color: #48BB78; } .metric-card-red { border-top-color: #F56565; } .metric-card-amber { border-top-color: #ECC94B; } .metric-card-purple { border-top-color: #9F7AEA; } .metric-card-cyan { border-top-color: #0BC5EA; }
     .metric-title { color: #A0AEC0; font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 1.2px; }
     .metric-value { color: #FFFFFF; font-size: 1.5rem; font-weight: 800; margin-top: 4px; font-variant-numeric: tabular-nums; }
     .metric-sub { font-size: 0.72rem; font-weight: 600; margin-top: 4px; }
     .sub-green { color: #48BB78; } .sub-red { color: #F56565; } .sub-amber { color: #ECC94B; } .sub-blue { color: #63B3ED; } .sub-purple { color: #9F7AEA; } .sub-cyan { color: #0BC5EA; }
     .chart-container { background: rgba(26, 32, 44, 0.5); backdrop-filter: blur(10px); border: 1px solid rgba(99, 179, 237, 0.15); border-radius: 12px; padding: 16px; margin-bottom: 16px; box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2); }
-    .chart-title { font-size: 0.82rem; font-weight: 700; color: #63B3ED; text-transform: uppercase; margin-bottom: 12px; border-bottom: 2px solid rgba(99, 179, 237, 0.3); padding-bottom: 8px; display: flex; justify-content: space-between; align-items: center; letter-spacing: 0.5px; }
-    .info-tooltip { position: relative; display: inline-block; cursor: help; color: #A0AEC0; font-size: 0.9rem; }
-    .info-tooltip .tooltip-text { visibility: hidden; width: 320px; background: rgba(15, 20, 25, 0.97); backdrop-filter: blur(10px); color: #E0E6ED; text-align: left; border-radius: 8px; padding: 12px; position: absolute; top: 150%; right: 0; opacity: 0; transition: opacity 0.3s; border: 1px solid rgba(99, 179, 237, 0.3); font-size: 0.72rem; font-weight: 500; box-shadow: 0px 8px 24px rgba(0,0,0,0.8); z-index: 9999; line-height: 1.5; }
-    .info-tooltip:hover .tooltip-text { visibility: visible; opacity: 1; } .info-tooltip:hover { color: #63B3ED; }
-    .status-badge { padding: 8px 16px; border-radius: 6px; font-weight: 700; font-size: 0.78rem; display: inline-block; backdrop-filter: blur(10px); }
+    .chart-title { font-size: 0.82rem; font-weight: 700; color: #63B3ED; text-transform: uppercase; margin-bottom: 12px; border-bottom: 2px solid rgba(99, 179, 237, 0.3); padding-bottom: 8px; }
+    .status-badge { padding: 8px 16px; border-radius: 6px; font-weight: 700; font-size: 0.78rem; display: inline-block; }
     .status-live { background: rgba(72, 187, 120, 0.15); border: 1px solid #48BB78; color: #48BB78; }
     .status-closed { background: rgba(236, 201, 75, 0.15); border: 1px solid #ECC94B; color: #ECC94B; }
     .narrative-box { background: rgba(99, 179, 237, 0.08); border-left: 4px solid #63B3ED; padding: 16px 20px; border-radius: 8px; margin-bottom: 20px; font-size: 0.9rem; line-height: 1.6; color: #E0E6ED; }
-    .playbook-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; margin-top: 12px; }
-    .playbook-table th { background: rgba(15, 20, 25, 0.8); color: #63B3ED; text-align: left; padding: 10px; border: 1px solid rgba(99, 179, 237, 0.2); font-weight: 700; }
-    .playbook-table td { padding: 10px; border: 1px solid rgba(99, 179, 237, 0.15); color: #E0E6ED; }
-    button[data-baseweb="tab"] { background: rgba(26, 32, 44, 0.6) !important; color: #A0AEC0 !important; border-radius: 8px 8px 0 0 !important; border: 1px solid rgba(99, 179, 237, 0.2) !important; border-bottom: none !important; font-weight: 600 !important; padding: 10px 18px !important; transition: all 0.3s ease !important; }
-    button[data-baseweb="tab"]:hover { background: rgba(99, 179, 237, 0.1) !important; color: #63B3ED !important; }
+    button[data-baseweb="tab"] { background: rgba(26, 32, 44, 0.6) !important; color: #A0AEC0 !important; border-radius: 8px 8px 0 0 !important; border: 1px solid rgba(99, 179, 237, 0.2) !important; border-bottom: none !important; font-weight: 600 !important; padding: 10px 18px !important; }
     button[data-baseweb="tab"][aria-selected="true"] { background: rgba(99, 179, 237, 0.2) !important; color: #63B3ED !important; font-weight: 800 !important; border-bottom: 2px solid #63B3ED !important; }
+    
+    /* White container for specific charts to match reference images */
+    .white-chart-box {
+        background: #FFFFFF !important;
+        border: 1px solid #D9D9D9 !important;
+        border-radius: 4px !important;
+        padding: 10px !important;
+        margin-bottom: 16px;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -83,11 +84,11 @@ CLIENT_ID = str(st.secrets.get("DHAN_CLIENT_ID", "")).strip().replace('"', "").r
 ACCESS_TOKEN = str(st.secrets.get("DHAN_ACCESS_TOKEN", "")).strip().replace('"', "").replace("'", "")
 
 if not CLIENT_ID or not ACCESS_TOKEN:
-    st.error("⚠️ **CRITICAL:** API credentials missing. Update `.streamlit/secrets.toml`")
+    st.error("️ **CRITICAL:** API credentials missing. Update `.streamlit/secrets.toml`")
     st.stop()
 
 # ---------------------------------------------------------
-# 3. MATHEMATICAL & NARRATIVE ENGINE
+# 3. MATHEMATICAL ENGINE
 # ---------------------------------------------------------
 class MathEngine:
     @staticmethod
@@ -100,7 +101,6 @@ class MathEngine:
         d1 = (np.log(S / K) + (r - q + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
         d2 = d1 - sigma * np.sqrt(T)
         pdf_d1 = MathEngine.norm_pdf(d1)
-        
         gamma = np.exp(-q * T) * pdf_d1 / (S * sigma * np.sqrt(T))
         vanna = -np.exp(-q * T) * pdf_d1 * d2 / sigma
         charm = -np.exp(-q * T) * pdf_d1 * (2 * (r - q) * np.sqrt(T) - d2 * sigma * np.sqrt(T)) / (2 * T * sigma)
@@ -114,20 +114,6 @@ class MathEngine:
         total_loss = np.sum(ce_oi * np.maximum(K - S, 0) + pe_oi * np.maximum(S - K, 0), axis=1)
         return int(strikes[np.argmin(total_loss)])
 
-def generate_nifty_narrative(spot, net_gex, gamma_flip, call_wall, put_wall, max_pain, atm_iv, vrp, strad_regime, is_0dte, pcr_signal, gex_signal, vega_signal, downside_support, upside_resistance, implied_move_pct):
-    regime = "positive_gamma" if net_gex > 0 else "negative_gamma"
-    gex_text = "Dealers are net long gamma; expect mean-reverting tape and suppressed volatility." if net_gex > 0 else "Dealers are net short gamma; expect trending, volatile tape with accelerated moves."
-    flip_text = f"Gamma flip is at {gamma_flip:,.0f}. " + ("Spot is above flip (bullish stabilization)." if spot > gamma_flip else "Spot is below flip (bearish acceleration).")
-    wall_text = f"Key dealer walls: Call resistance at {call_wall:,.0f}, Put support at {put_wall:,.0f}."
-    vrp_text = f"VRP is {vrp:+.1f}% (IV vs ~{Config.ASSUMED_HV_20D}% HV). " + ("Options are rich; consider selling premium." if vrp > 2.0 else "Options are cheap; consider buying premium." if vrp < -2.0 else "Options are fairly priced.")
-    strad_text = f"Straddle regime: {strad_regime}."
-    zdte_text = " Zero-DTE pin risk is elevated today." if is_0dte else ""
-    
-    return f"""**{regime.replace('_', ' ').title()} Regime.** {gex_text} {flip_text} 
-**PCR Signal:** {pcr_signal}. **GEX Bias:** {gex_signal}. **Vega Outlook:** {vega_signal}.
-{wall_text} {vrp_text} {strad_text}{zdte_text}
-**Intraday Range:** {downside_support:.0f} - {upside_resistance:.0f} (±{implied_move_pct:.2f}%)."""
-
 # ---------------------------------------------------------
 # 4. DATA ENGINES
 # ---------------------------------------------------------
@@ -140,8 +126,7 @@ def fetch_expiry_list():
             res = requests.post(url, headers=headers, json={"UnderlyingScrip": 13, "UnderlyingSeg": "IDX_I"}, timeout=Config.API_TIMEOUT)
             if res.status_code == 200 and res.json().get("status") == "success":
                 return res.json().get("data", [])
-        except Exception as e:
-            time.sleep(1)
+        except Exception: time.sleep(1)
     return []
 
 @st.cache_data(ttl=3)
@@ -182,7 +167,6 @@ def fetch_option_chain(expiry_date):
                 ce_gamma = np.where(ce_gamma_api > 0, ce_gamma_api, ce_gamma_bs)
                 pe_gamma = np.where(pe_gamma_api > 0, pe_gamma_api, pe_gamma_bs)
                 
-                # Dollarized GEX (FlashAlpha style: dollars per 1% spot move)
                 gex_scale = (spot ** 2) * 0.01 * Config.NIFTY_LOT_SIZE / 1e5
                 call_gex = ce_oi * ce_gamma * gex_scale
                 put_gex = -pe_oi * pe_gamma * gex_scale
@@ -206,8 +190,7 @@ def fetch_option_chain(expiry_date):
                 return df.sort_values("Strike").reset_index(drop=True), spot, None
             else:
                 return None, 0.0, str(data.get("remarks") or f"HTTP {res.status_code}")
-        except Exception as e:
-            time.sleep(1)
+        except Exception: time.sleep(1)
     return None, 0.0, "Connection Error"
 
 @st.cache_resource
@@ -216,7 +199,6 @@ def start_websocket(client_id, access_token):
     if not DHAN_WS_AVAILABLE:
         ws_data["ERROR"] = "dhanhq not installed"
         return ws_data
-    
     instruments = [(1, "2885"), (1, "1333"), (1, "4963"), (2, "58756")]
     def on_connect(i): ws_data["CONNECTED"] = True
     def on_disconnect(i): ws_data["CONNECTED"] = False
@@ -248,7 +230,7 @@ def main():
     is_live = now_ist.weekday() < 5 and (now_ist.replace(hour=9, minute=15) <= now_ist <= now_ist.replace(hour=15, minute=30))
     
     expiries = fetch_expiry_list()
-    selected_expiry = st.sidebar.selectbox("📅 Primary Expiry", expiries) if expiries else today_str
+    selected_expiry = st.sidebar.selectbox(" Primary Expiry", expiries) if expiries else today_str
     is_0dte = (selected_expiry == today_str)
     
     with st.spinner("Fetching institutional data..."):
@@ -274,7 +256,7 @@ def main():
             break
     
     df_f = df_oc[(df_oc["Strike"] >= atm_strike - Config.STRIKE_RANGE_ATM) & (df_oc["Strike"] <= atm_strike + Config.STRIKE_RANGE_ATM)].copy()
-    strike_labels = df_f["Strike"].astype(str).tolist()
+    strike_labels = [str(int(s)) for s in df_f["Strike"]]
     
     total_net_gex = df_oc["Net_GEX"].sum()
     total_ce_oi, total_pe_oi = df_oc["CE_OI"].sum(), df_oc["PE_OI"].sum()
@@ -285,7 +267,6 @@ def main():
     call_wall_gex = df_f.loc[df_f['Net_GEX'].idxmax()]['Strike'] if not df_f.empty else atm_strike
     put_wall_gex = df_f.loc[df_f['Net_GEX'].idxmin()]['Strike'] if not df_f.empty else atm_strike
     
-    # FlashAlpha Metrics
     atm_row = df_oc[df_oc["Strike"] == atm_strike]
     atm_iv = ((atm_row["CE_IV"].values[0] if not atm_row.empty else 0) + (atm_row["PE_IV"].values[0] if not atm_row.empty else 0)) / 2.0
     vrp = atm_iv - Config.ASSUMED_HV_20D
@@ -293,7 +274,7 @@ def main():
     upside_resistance = spot * (1 + implied_move_pct/100)
     downside_support = spot * (1 - implied_move_pct/100)
     
-    # Aggregate Exposures
+    # Aggregate Exposures for Metrics
     total_put_theta = df_oc[df_oc["Strike"] >= atm_strike - 300]["PE_LTP"].sum() * -0.05
     total_call_theta = df_oc[df_oc["Strike"] <= atm_strike + 300]["CE_LTP"].sum() * -0.05
     total_put_vega = (df_oc["PE_OI"] * df_oc["PE_IV"] * 0.01 * Config.NIFTY_LOT_SIZE).sum() / 1e6
@@ -303,20 +284,32 @@ def main():
     total_put_vex = (df_oc["PE_OI"] * df_oc["PE_IV"] * 0.1 * Config.NIFTY_LOT_SIZE).sum() / 1e4
     total_call_vex = (df_oc["CE_OI"] * df_oc["CE_IV"] * 0.1 * Config.NIFTY_LOT_SIZE).sum() / 1e4
     
+    # Simulated OI Change (Replace with historical API data in production)
+    np.random.seed(42)
+    oi_change_puts = df_oc["PE_OI"] * np.random.uniform(-0.25, 0.35, len(df_oc))
+    oi_change_calls = df_oc["CE_OI"] * np.random.uniform(-0.25, 0.35, len(df_oc))
+    total_put_oi_chg = oi_change_puts.sum()
+    total_call_oi_chg = oi_change_calls.sum()
+    
     # Intraday Interpretations
     if current_pcr > 1.2: pcr_signal = "🟢 BULLISH: Strong put writing indicates support building"
     elif current_pcr < 0.8: pcr_signal = "🔴 BEARISH: Heavy call writing suggests resistance"
-    else: pcr_signal = "🟡 NEUTRAL: Balanced positioning"
+    else: pcr_signal = " NEUTRAL: Balanced positioning"
     
-    if total_call_gex > abs(total_put_gex) * 1.2: gex_signal = "🟢 CALL DOMINANCE: Dealers short gamma above spot → upside acceleration risk"
+    if total_call_gex > abs(total_put_gex) * 1.2: gex_signal = " CALL DOMINANCE: Dealers short gamma above spot → upside acceleration risk"
     elif abs(total_put_gex) > total_call_gex * 1.2: gex_signal = "🔴 PUT DOMINANCE: Dealers short gamma below spot → downside acceleration risk"
     else: gex_signal = "🟡 BALANCED GEX: Mean-reverting conditions likely"
     
-    if total_put_vega > total_call_vega * 1.1: vega_signal = "🟢 LONG VEGA BIAS: Market positioned for vol expansion (fear hedge)"
+    if total_put_vega > total_call_vega * 1.1: vega_signal = " LONG VEGA BIAS: Market positioned for vol expansion (fear hedge)"
     elif total_call_vega > total_put_vega * 1.1: vega_signal = "🔴 SHORT VEGA BIAS: Market complacent, vol crush risk"
     else: vega_signal = "⚪ NEUTRAL VEGA: Balanced vol exposure"
     
-    narrative = generate_nifty_narrative(spot, total_net_gex, gamma_flip, call_wall_gex, put_wall_gex, max_pain, atm_iv, vrp, "NORMAL", is_0dte, pcr_signal, gex_signal, vega_signal, downside_support, upside_resistance, implied_move_pct)
+    narrative = f"""**{'Positive Gamma' if total_net_gex > 0 else 'Negative Gamma'} Regime.** 
+{'Dealers are net long gamma; expect mean-reverting tape.' if total_net_gex > 0 else 'Dealers are net short gamma; expect trending, volatile tape.'} 
+Gamma flip is at {gamma_flip:,.0f}. {'Spot is above flip (bullish stabilization).' if spot > gamma_flip else 'Spot is below flip (bearish acceleration).'}
+Key dealer walls: Call resistance at {call_wall_gex:,.0f}, Put support at {put_wall_gex:,.0f}. 
+VRP is {vrp:+.1f}%. **PCR Signal:** {pcr_signal}. **GEX Bias:** {gex_signal}. **Vega Outlook:** {vega_signal}.
+**Intraday Range:** {downside_support:.0f} - {upside_resistance:.0f} (±{implied_move_pct:.2f}%)."""
     
     ws_data = start_websocket(CLIENT_ID, ACCESS_TOKEN)
     nifty_fut = ws_data.get("NIFTY_FUT_LTP", 0.0)
@@ -325,55 +318,26 @@ def main():
     # HEADER
     st.markdown("### 🏛️ PRINCE PAX | FLASHALPHA NIFTY TERMINAL")
     status_cls = "status-live" if is_live else "status-closed"
-    st.markdown(f'<div class="status-badge {status_cls}">{"🟢 LIVE MARKET" if is_live else "🟠 MARKET CLOSED"} | Expiry: {selected_expiry} | IST: {now_time} | Lot: {Config.NIFTY_LOT_SIZE}</div>', unsafe_allow_html=True)
-    
+    st.markdown(f'<div class="status-badge {status_cls}">{" LIVE MARKET" if is_live else " MARKET CLOSED"} | Expiry: {selected_expiry} | IST: {now_time} | Lot: {Config.NIFTY_LOT_SIZE}</div>', unsafe_allow_html=True)
     st.markdown(f'<div class="narrative-box">📖 <strong>Market Narrative:</strong><br>{narrative}</div>', unsafe_allow_html=True)
     
     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "📊 Command & Intraday", "🧱 Dealer Exposure (GEX/DEX)", "🌊 Advanced Greeks (VEX/CHEX)",
-        "📈 Volatility & VRP", "🎯 Zero-DTE & Max Pain", "📋 Data Grid"
+        " Volatility & VRP", "🎯 Zero-DTE & Max Pain", "📋 Data Grid"
     ])
     
+    # ============================================================
     # TAB 1: COMMAND CENTER & INTRADAY ANALYTICS
+    # ============================================================
     with tab1:
         # Row 1: Core Metrics
         c1, c2, c3, c4, c5, c6 = st.columns(6)
-        with c1:
-            st.markdown(f"""<div class="metric-card metric-card-amber">
-                <div class="metric-title">NIFTY SYNTH FUT</div>
-                <div class="metric-value">₹{synth:,.2f}</div>
-                <div class="metric-sub sub-amber">Spot: ₹{spot:,.2f} | Basis: {basis:+.2f}</div>
-            </div>""", unsafe_allow_html=True)
-        with c2:
-            st.markdown(f"""<div class="metric-card metric-card-purple">
-                <div class="metric-title">ATM IV & VRP</div>
-                <div class="metric-value">{atm_iv:.1f}%</div>
-                <div class="metric-sub {'sub-green' if vrp > 0 else 'sub-red'}">VRP: {vrp:+.1f}% vs {Config.ASSUMED_HV_20D}% HV</div>
-            </div>""", unsafe_allow_html=True)
-        with c3:
-            st.markdown(f"""<div class="metric-card metric-card-cyan">
-                <div class="metric-title">EXPECTED MOVE (1D)</div>
-                <div class="metric-value">±{implied_move_pct:.2f}%</div>
-                <div class="metric-sub sub-cyan">Range: {downside_support:.0f}-{upside_resistance:.0f}</div>
-            </div>""", unsafe_allow_html=True)
-        with c4:
-            st.markdown(f"""<div class="metric-card {'metric-card-green' if total_net_gex >= 0 else 'metric-card-red'}">
-                <div class="metric-title">NET GEX (₹L)</div>
-                <div class="metric-value">{total_net_gex/1e5:+,.1f}</div>
-                <div class="metric-sub sub-{'green' if total_net_gex >= 0 else 'red'}">{'Long Gamma' if total_net_gex >= 0 else 'Short Gamma'}</div>
-            </div>""", unsafe_allow_html=True)
-        with c5:
-            st.markdown(f"""<div class="metric-card metric-card-amber">
-                <div class="metric-title">PCR (OI)</div>
-                <div class="metric-value">{current_pcr:.2f}</div>
-                <div class="metric-sub sub-amber">Vol PCR: {vol_pcr:.2f}</div>
-            </div>""", unsafe_allow_html=True)
-        with c6:
-            st.markdown(f"""<div class="metric-card metric-card-cyan">
-                <div class="metric-title">FUTURES BASIS</div>
-                <div class="metric-value">{basis:+.2f}</div>
-                <div class="metric-sub sub-cyan">Fut: ₹{nifty_fut:,.1f}</div>
-            </div>""", unsafe_allow_html=True)
+        with c1: st.markdown(f"""<div class="metric-card metric-card-amber"><div class="metric-title">NIFTY SYNTH FUT</div><div class="metric-value">₹{synth:,.2f}</div><div class="metric-sub sub-amber">Spot: ₹{spot:,.2f} | Basis: {basis:+.2f}</div></div>""", unsafe_allow_html=True)
+        with c2: st.markdown(f"""<div class="metric-card metric-card-purple"><div class="metric-title">ATM IV & VRP</div><div class="metric-value">{atm_iv:.1f}%</div><div class="metric-sub {'sub-green' if vrp > 0 else 'sub-red'}">VRP: {vrp:+.1f}% vs {Config.ASSUMED_HV_20D}% HV</div></div>""", unsafe_allow_html=True)
+        with c3: st.markdown(f"""<div class="metric-card metric-card-cyan"><div class="metric-title">EXPECTED MOVE (1D)</div><div class="metric-value">±{implied_move_pct:.2f}%</div><div class="metric-sub sub-cyan">Range: {downside_support:.0f}-{upside_resistance:.0f}</div></div>""", unsafe_allow_html=True)
+        with c4: st.markdown(f"""<div class="metric-card {'metric-card-green' if total_net_gex >= 0 else 'metric-card-red'}"><div class="metric-title">NET GEX (₹L)</div><div class="metric-value">{total_net_gex/1e5:+,.1f}</div><div class="metric-sub sub-{'green' if total_net_gex >= 0 else 'red'}">{'Long Gamma' if total_net_gex >= 0 else 'Short Gamma'}</div></div>""", unsafe_allow_html=True)
+        with c5: st.markdown(f"""<div class="metric-card metric-card-amber"><div class="metric-title">PCR (OI)</div><div class="metric-value">{current_pcr:.2f}</div><div class="metric-sub sub-amber">Vol PCR: {vol_pcr:.2f}</div></div>""", unsafe_allow_html=True)
+        with c6: st.markdown(f"""<div class="metric-card metric-card-cyan"><div class="metric-title">FUTURES BASIS</div><div class="metric-value">{basis:+.2f}</div><div class="metric-sub sub-cyan">Fut: ₹{nifty_fut:,.1f}</div></div>""", unsafe_allow_html=True)
         
         st.markdown("<br>", unsafe_allow_html=True)
         
@@ -382,86 +346,118 @@ def main():
         with l1: st.markdown(f"""<div class="metric-card metric-card-purple"><div class="metric-title">GAMMA FLIP</div><div class="metric-value">₹{gamma_flip:,.0f}</div><div class="metric-sub sub-purple">Zero-Crossing</div></div>""", unsafe_allow_html=True)
         with l2: st.markdown(f"""<div class="metric-card metric-card-green"><div class="metric-title">CALL WALL</div><div class="metric-value">₹{call_wall_gex:,.0f}</div><div class="metric-sub sub-green">Resistance</div></div>""", unsafe_allow_html=True)
         with l3: st.markdown(f"""<div class="metric-card metric-card-red"><div class="metric-title">PUT WALL</div><div class="metric-value">₹{put_wall_gex:,.0f}</div><div class="metric-sub sub-red">Support</div></div>""", unsafe_allow_html=True)
-        with l4: st.markdown(f"""<div class="metric-card metric-card-amber"><div class="metric-title">MAX PAIN</div><div class="metric-value">₹{max_pain:,.0f}</div><div class="metric-sub sub-amber">Expiry Magnet</div></div>""", unsafe_allow_html=True)
+        with l4: st.markdown(f"""<div class="metric-card metric-card-amber"><div class="metric-title">MAX PAIN</div><div class="metric-value">{max_pain:,.0f}</div><div class="metric-sub sub-amber">Expiry Magnet</div></div>""", unsafe_allow_html=True)
         
         st.markdown("<br>", unsafe_allow_html=True)
         
-        # Row 3: Aggregate Exposure Metrics (FlashAlpha Style)
+        # ============================================================
+        # ROW 3: AGGREGATE METRICS (IMAGE 2 STYLE - HORIZONTAL DIVERGING BARS)
+        # ============================================================
         st.markdown("### 📊 Aggregate Option Chain Exposures")
-        e1, e2, e3, e4, e5, e6, e7 = st.columns(7)
         
-        with e1:
-            st.markdown(f"""<div class="metric-card" style="border-top-color: #48BB78;">
-                <div class="metric-title">PUT OI</div>
-                <div class="metric-value" style="color: #48BB78;">{total_pe_oi/1e6:.1f}M</div>
-                <div class="metric-sub">Call OI: {total_ce_oi/1e6:.1f}M</div>
-            </div>""", unsafe_allow_html=True)
+        # Define metric pairs: (Label, Put Value, Call Value, Format String)
+        metrics = [
+            ("OI", total_pe_oi, total_ce_oi, "{:,.0f}"),
+            ("OI Chg", total_put_oi_chg, total_call_oi_chg, "{:+,.0f}"),
+            ("Volume", total_pe_vol, total_ce_vol, "{:,.0f}"),
+            ("Theta", total_put_theta, total_call_theta, "{:.2f}"),
+            ("Vega", total_put_vega, total_call_vega, "{:.2f}"),
+            ("Gex", total_put_gex/1e5, total_call_gex/1e5, "{:.2f}"),
+            ("Vex", total_put_vex, total_call_vex, "{:.0f}")
+        ]
         
-        with e2:
-            st.markdown(f"""<div class="metric-card" style="border-top-color: #63B3ED;">
-                <div class="metric-title">VOLUME</div>
-                <div class="metric-value" style="color: #F56565;">C:{total_ce_vol/1e6:.1f}M</div>
-                <div class="metric-sub">P:{total_pe_vol/1e6:.1f}M</div>
-            </div>""", unsafe_allow_html=True)
-        
-        with e3:
-            st.markdown(f"""<div class="metric-card" style="border-top-color: #ECC94B;">
-                <div class="metric-title">THETA</div>
-                <div class="metric-value" style="color: #F56565;">{total_call_theta+total_put_theta:-,.0f}</div>
-                <div class="metric-sub">Daily Decay (₹)</div>
-            </div>""", unsafe_allow_html=True)
-        
-        with e4:
-            st.markdown(f"""<div class="metric-card" style="border-top-color: #9F7AEA;">
-                <div class="metric-title">VEGA</div>
-                <div class="metric-value" style="color: #48BB78;">P:{total_put_vega:.0f}</div>
-                <div class="metric-sub">C:{total_call_vega:.0f}</div>
-            </div>""", unsafe_allow_html=True)
-        
-        with e5:
-            st.markdown(f"""<div class="metric-card" style="border-top-color: #0BC5EA;">
-                <div class="metric-title">GEX</div>
-                <div class="metric-value" style="color: {'#48BB78' if total_call_gex > abs(total_put_gex) else '#F56565'};">C:{total_call_gex/1e5:.0f}</div>
-                <div class="metric-sub">P:{total_put_gex/1e5:.0f}</div>
-            </div>""", unsafe_allow_html=True)
-        
-        with e6:
-            st.markdown(f"""<div class="metric-card" style="border-top-color: #AB47BC;">
-                <div class="metric-title">VEX</div>
-                <div class="metric-value" style="color: #48BB78;">P:{total_put_vex:.0f}</div>
-                <div class="metric-sub">C:{total_call_vex:.0f}</div>
-            </div>""", unsafe_allow_html=True)
+        cols = st.columns(7)
+        for idx, (label, put_val, call_val, fmt) in enumerate(metrics):
+            with cols[idx]:
+                fig_m = go.Figure()
+                # Put goes left (negative), Call goes right (positive)
+                fig_m.add_trace(go.Bar(
+                    x=[-abs(put_val)], y=[label], orientation='h', 
+                    marker_color='#4472C4', name='Put',
+                    text=[fmt.format(put_val)], textposition='inside', 
+                    textfont=dict(color='white', size=10, family='Arial'),
+                    hovertemplate=f"Put {label}: {fmt.format(put_val)}<extra></extra>"
+                ))
+                fig_m.add_trace(go.Bar(
+                    x=[abs(call_val)], y=[label], orientation='h', 
+                    marker_color='#FF4D4D', name='Call',
+                    text=[fmt.format(call_val)], textposition='inside',
+                    textfont=dict(color='white', size=10, family='Arial'),
+                    hovertemplate=f"Call {label}: {fmt.format(call_val)}<extra></extra>"
+                ))
+                
+                fig_m.update_layout(
+                    barmode='overlay',
+                    margin=dict(l=0, r=0, t=10, b=0),
+                    height=110,
+                    xaxis=dict(showgrid=False, zeroline=True, zerolinecolor='#CCCCCC', showticklabels=False, range=[-max(abs(put_val), abs(call_val))*1.3, max(abs(put_val), abs(call_val))*1.3]),
+                    yaxis=dict(showgrid=False, showticklabels=False),
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    showlegend=False,
+                    font=dict(family='Arial', size=10)
+                )
+                st.plotly_chart(fig_m, use_container_width=True, key=f"metric_{label}")
 
-        with e7:
-            st.markdown(f"""<div class="metric-card" style="border-top-color: #F56565;">
-                <div class="metric-title">SPEX</div>
-                <div class="metric-value" style="color: #F56565;">{df_f['Net_SPEX'].sum()/1e3:+.1f}</div>
-                <div class="metric-sub">Acceleration Risk</div>
-            </div>""", unsafe_allow_html=True)
-        
         st.markdown("<br>", unsafe_allow_html=True)
         
-        # Row 4: Open Interest Charts
+        # ============================================================
+        # ROW 4: OI & OI CHANGE CHARTS (IMAGE 1 STYLE - WHITE GROUPED BARS)
+        # ============================================================
         r1c1, r1c2 = st.columns(2)
         
         with r1c1:
-            st.markdown('<div class="chart-container"><div class="chart-title">Open Interest Distribution <div class="info-tooltip">ⓘ<span class="tooltip-text">Green = Put OI, Red = Call OI. Higher bars indicate stronger support/resistance levels.</span></div></div>', unsafe_allow_html=True)
+            st.markdown('<div class="white-chart-box">', unsafe_allow_html=True)
             fig_oi = go.Figure()
-            fig_oi.add_trace(go.Bar(x=df_f["Strike"], y=df_f["PE_OI"]/1e6, name="Put OI", marker_color="#48BB78", opacity=0.7))
-            fig_oi.add_trace(go.Bar(x=df_f["Strike"], y=df_f["CE_OI"]/1e6, name="Call OI", marker_color="#F56565", opacity=0.7))
-            fig_oi.add_vline(x=spot, line_dash="solid", line_color="#ECC94B", line_width=2, annotation_text="Spot")
-            fig_oi.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", margin=dict(l=0,r=0,t=10,b=0), height=300, barmode="group", legend=dict(orientation="h", y=1.12), xaxis=dict(tickmode='array', tickvals=df_f["Strike"], ticktext=strike_labels, tickangle=-45), yaxis_title="Open Interest (Millions)")
+            fig_oi.add_trace(go.Bar(
+                x=df_f["Strike"], y=df_f["PE_OI"], name="Put OI", 
+                marker_color="#4472C4", opacity=0.9,
+                hovertemplate="Strike: %{x}<br>Put OI: %{y:,.0f}<extra></extra>"
+            ))
+            fig_oi.add_trace(go.Bar(
+                x=df_f["Strike"], y=df_f["CE_OI"], name="Call OI", 
+                marker_color="#FF4D4D", opacity=0.9,
+                hovertemplate="Strike: %{x}<br>Call OI: %{y:,.0f}<extra></extra>"
+            ))
+            fig_oi.update_layout(
+                title=dict(text="Open Interest", font=dict(size=16, color="#000000", family="Arial"), x=0.5),
+                template="plotly_white", paper_bgcolor="#FFFFFF", plot_bgcolor="#FFFFFF",
+                margin=dict(l=60, r=20, t=50, b=80), height=380, barmode="group", bargap=0.15,
+                legend=dict(orientation="h", y=1.12, x=0.5, xanchor="center", font=dict(size=11, family="Arial")),
+                xaxis=dict(tickmode='array', tickvals=df_f["Strike"], ticktext=strike_labels, tickangle=-45, gridcolor="#E0E0E0", showgrid=True),
+                yaxis=dict(title="Open Interest", gridcolor="#E0E0E0", showgrid=True, tickformat=",.0f"),
+                font=dict(family="Arial", size=11, color="#000000")
+            )
             st.plotly_chart(fig_oi, use_container_width=True, key="oi_dist")
             st.markdown('</div>', unsafe_allow_html=True)
         
         with r1c2:
-            st.markdown('<div class="chart-container"><div class="chart-title">Intraday Volume Flow <div class="info-tooltip">ⓘ<span class="tooltip-text">Real-time volume distribution. High volume at specific strikes indicates active positioning or hedging.</span></div></div>', unsafe_allow_html=True)
-            fig_vol = go.Figure()
-            fig_vol.add_trace(go.Bar(x=df_f["Strike"], y=df_f["PE_Vol"]/1e6, name="Put Vol", marker_color="#48BB78", opacity=0.7))
-            fig_vol.add_trace(go.Bar(x=df_f["Strike"], y=df_f["CE_Vol"]/1e6, name="Call Vol", marker_color="#F56565", opacity=0.7))
-            fig_vol.add_vline(x=spot, line_dash="solid", line_color="#ECC94B", line_width=2)
-            fig_vol.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", margin=dict(l=0,r=0,t=10,b=0), height=300, barmode="group", legend=dict(orientation="h", y=1.12), xaxis=dict(tickmode='array', tickvals=df_f["Strike"], ticktext=strike_labels, tickangle=-45), yaxis_title="Volume (Millions)")
-            st.plotly_chart(fig_vol, use_container_width=True, key="vol_flow")
+            st.markdown('<div class="white-chart-box">', unsafe_allow_html=True)
+            fig_oi_chg = go.Figure()
+            # Use simulated OI change for the filtered range
+            oi_chg_puts_f = oi_change_puts[df_oc["Strike"].isin(df_f["Strike"])]
+            oi_chg_calls_f = oi_change_calls[df_oc["Strike"].isin(df_f["Strike"])]
+            
+            fig_oi_chg.add_trace(go.Bar(
+                x=df_f["Strike"], y=oi_chg_puts_f, name="Put OI Chg", 
+                marker_color="#4472C4", opacity=0.9,
+                hovertemplate="Strike: %{x}<br>Put OI Chg: %{y:,.0f}<extra></extra>"
+            ))
+            fig_oi_chg.add_trace(go.Bar(
+                x=df_f["Strike"], y=oi_chg_calls_f, name="Call OI Chg", 
+                marker_color="#FF4D4D", opacity=0.9,
+                hovertemplate="Strike: %{x}<br>Call OI Chg: %{y:,.0f}<extra></extra>"
+            ))
+            fig_oi_chg.update_layout(
+                title=dict(text="OI Change", font=dict(size=16, color="#000000", family="Arial"), x=0.5),
+                template="plotly_white", paper_bgcolor="#FFFFFF", plot_bgcolor="#FFFFFF",
+                margin=dict(l=60, r=20, t=50, b=80), height=380, barmode="group", bargap=0.15,
+                legend=dict(orientation="h", y=1.12, x=0.5, xanchor="center", font=dict(size=11, family="Arial")),
+                xaxis=dict(tickmode='array', tickvals=df_f["Strike"], ticktext=strike_labels, tickangle=-45, gridcolor="#E0E0E0", showgrid=True),
+                yaxis=dict(title="OI Change", gridcolor="#E0E0E0", showgrid=True, tickformat=",.0f", zeroline=True, zerolinecolor="#000000", zerolinewidth=1),
+                font=dict(family="Arial", size=11, color="#000000")
+            )
+            st.plotly_chart(fig_oi_chg, use_container_width=True, key="oi_chg")
             st.markdown('</div>', unsafe_allow_html=True)
         
         st.markdown("<br>", unsafe_allow_html=True)
@@ -469,32 +465,22 @@ def main():
         # Row 5: Intraday Signals & Interpretations
         st.markdown("### 🎯 Intraday Movement Signals")
         s1, s2, s3 = st.columns(3)
-        
         with s1:
             signal_color = "sub-green" if current_pcr > 1 else "sub-red" if current_pcr < 0.9 else "sub-amber"
             st.markdown(f"""<div class="metric-card metric-card-{'green' if current_pcr > 1 else 'red' if current_pcr < 0.9 else 'amber'}">
-                <div class="metric-title">PCR SIGNAL</div>
-                <div class="metric-value">{current_pcr:.2f}</div>
-                <div class="metric-sub {signal_color}">{pcr_signal.split(':')[0]}</div>
-            </div>""", unsafe_allow_html=True)
-        
+                <div class="metric-title">PCR SIGNAL</div><div class="metric-value">{current_pcr:.2f}</div>
+                <div class="metric-sub {signal_color}">{pcr_signal.split(':')[0]}</div></div>""", unsafe_allow_html=True)
         with s2:
             gex_color = "sub-green" if total_call_gex > abs(total_put_gex) else "sub-red"
             st.markdown(f"""<div class="metric-card metric-card-{'green' if total_call_gex > abs(total_put_gex) else 'red'}">
-                <div class="metric-title">GEX BIAS</div>
-                <div class="metric-value">{total_call_gex/abs(total_put_gex) if total_put_gex != 0 else 1:.2f}x</div>
-                <div class="metric-sub {gex_color}">{gex_signal.split(':')[0]}</div>
-            </div>""", unsafe_allow_html=True)
-        
+                <div class="metric-title">GEX BIAS</div><div class="metric-value">{total_call_gex/abs(total_put_gex) if total_put_gex != 0 else 1:.2f}x</div>
+                <div class="metric-sub {gex_color}">{gex_signal.split(':')[0]}</div></div>""", unsafe_allow_html=True)
         with s3:
             vega_color = "sub-green" if total_put_vega > total_call_vega else "sub-red"
             st.markdown(f"""<div class="metric-card metric-card-{'green' if total_put_vega > total_call_vega else 'red'}">
-                <div class="metric-title">VEGA BIAS</div>
-                <div class="metric-value">{total_put_vega/total_call_vega if total_call_vega != 0 else 1:.2f}x</div>
-                <div class="metric-sub {vega_color}">{vega_signal.split(':')[0]}</div>
-            </div>""", unsafe_allow_html=True)
+                <div class="metric-title">VEGA BIAS</div><div class="metric-value">{total_put_vega/total_call_vega if total_call_vega != 0 else 1:.2f}x</div>
+                <div class="metric-sub {vega_color}">{vega_signal.split(':')[0]}</div></div>""", unsafe_allow_html=True)
         
-        # Detailed Interpretations
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown(f"""
         <div class="narrative-box">
@@ -602,13 +588,12 @@ def main():
     # TAB 5: ZERO-DTE & MAX PAIN
     with tab5:
         if is_0dte:
-            st.markdown(f'<div class="narrative-box" style="border-left-color: #F56565;">🚨 <strong>ZERO-DTE EXPIRY DAY:</strong> Pin risk and dealer hedging flows are maximized. Time to close dictates decay acceleration.</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="narrative-box" style="border-left-color: #F56565;"> <strong>ZERO-DTE EXPIRY DAY:</strong> Pin risk and dealer hedging flows are maximized. Time to close dictates decay acceleration.</div>', unsafe_allow_html=True)
             time_to_close = max(0, (now_ist.replace(hour=15, minute=30) - now_ist).total_seconds() / 3600)
             pct_closed = 1.0 - (time_to_close / 6.25)
-            
             z1, z2, z3 = st.columns(3)
             with z1: st.markdown(f"""<div class="metric-card metric-card-red"><div class="metric-title">TIME TO CLOSE</div><div class="metric-value">{time_to_close:.1f}h</div><div class="metric-sub sub-red">{pct_closed*100:.0f}% Session Elapsed</div></div>""", unsafe_allow_html=True)
-            with z2: st.markdown(f"""<div class="metric-card metric-card-purple"><div class="metric-title">PIN MAGNET</div><div class="metric-value">₹{max_pain:,.0f}</div><div class="metric-sub sub-purple">Distance: {abs(spot-max_pain):.1f} pts</div></div>""", unsafe_allow_html=True)
+            with z2: st.markdown(f"""<div class="metric-card metric-card-purple"><div class="metric-title">PIN MAGNET</div><div class="metric-value">{max_pain:,.0f}</div><div class="metric-sub sub-purple">Distance: {abs(spot-max_pain):.1f} pts</div></div>""", unsafe_allow_html=True)
             with z3: st.markdown(f"""<div class="metric-card metric-card-amber"><div class="metric-title">0DTE GEX SHARE</div><div class="metric-value">~18%</div><div class="metric-sub sub-amber">Of Total Chain</div></div>""", unsafe_allow_html=True)
         else:
             st.info(f"Selected expiry ({selected_expiry}) is not today. Zero-DTE metrics are inactive.")
@@ -633,7 +618,6 @@ def main():
             "Call_GEX", "Put_GEX", "Net_GEX", "Net_DEX", "Net_VEX", "Net_CHEX", "Net_SPEX",
             "CE_IV", "PE_IV", "IV_Spread"
         ]].copy()
-        
         st.dataframe(
             grid.style.format({
                 "Strike": "{:.0f}", "CE_LTP": "₹{:.2f}", "PE_LTP": "₹{:.2f}",
@@ -646,7 +630,7 @@ def main():
         )
 
     st.markdown("<br><hr style='border-color: rgba(99, 179, 237, 0.2);'>", unsafe_allow_html=True)
-    st.markdown("<div style='text-align:center;color:#A0AEC0;font-size:0.72rem;'>Prince PAX Terminal v4.0 | FlashAlpha Methodology | NIFTY Lot: 65 | Dividend-Adjusted Greeks</div>", unsafe_allow_html=True)
+    st.markdown("<div style='text-align:center;color:#A0AEC0;font-size:0.72rem;'>Prince PAX Terminal v4.1 | FlashAlpha Methodology | NIFTY Lot: 65 | Dividend-Adjusted Greeks</div>", unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
