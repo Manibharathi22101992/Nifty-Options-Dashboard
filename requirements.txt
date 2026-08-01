@@ -1,8 +1,8 @@
 streamlit
-streamlit-autorefresh
 pandas
+numpy
 plotly
 requests
+streamlit-autorefresh
 pyarrow
-websocket-client
 dhanhq
