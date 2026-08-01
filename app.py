@@ -17,7 +17,7 @@ logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s -
 # ---------------------------------------------------------
 # 1. CONFIGURATION & CONSTANTS
 # ---------------------------------------------------------
-NIFTY_LOT_SIZE = 60
+NIFTY_LOT_SIZE = 25
 RISK_FREE_RATE = 0.07
 API_TIMEOUT = 10
 MAX_RETRIES = 3
