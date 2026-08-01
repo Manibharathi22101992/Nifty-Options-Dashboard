@@ -320,7 +320,7 @@ def fetch_gex_option_chain(expiry_date):
     except Exception as e: return None, 0.0, f"Connection Error: {str(e)}"
 
 # ---------------------------------------------------------
-# 5. MULTI-EXPIRY TERM STRUCTURE ENGINE (4 EXPIRIES)
+# 5. MULTI-EXPIRY TERM STRUCTURE & 3D SURFACE ENGINE
 # ---------------------------------------------------------
 @st.cache_data(ttl=300)
 def fetch_expiry_list_direct():
@@ -341,6 +341,7 @@ def fetch_multi_expiry_vol_structure(spot_price):
     else: expiries = expiries[:4]
 
     vol_data = []
+    surface_data = []
 
     for idx, exp in enumerate(expiries):
         if idx > 0: time.sleep(1.2)
@@ -359,9 +360,20 @@ def fetch_multi_expiry_vol_structure(spot_price):
             days_to_exp = max((datetime.datetime.strptime(exp, "%Y-%m-%d").date() - datetime.date.today()).days, 1)
 
             vol_data.append({"Expiry": datetime.datetime.strptime(exp, "%Y-%m-%d").strftime("%d %b"), "Days": days_to_exp, "Tenor_Years": days_to_exp / 365.0, "Mean_IV": mean_iv})
+            
+            for _, r in df_exp.iterrows():
+                if exp_atm_strike - 600 <= r["Strike"] <= exp_atm_strike + 600:
+                    surface_data.append({
+                        "Expiry": exp,
+                        "Days": days_to_exp,
+                        "Strike": r["Strike"],
+                        "IV": (r["CE_IV"] + r["PE_IV"]) / 2.0
+                    })
 
     df_vol = pd.DataFrame(vol_data)
-    if df_vol.empty or len(df_vol) < 2: return pd.DataFrame()
+    df_surf = pd.DataFrame(surface_data)
+    
+    if df_vol.empty or len(df_vol) < 2: return pd.DataFrame(), pd.DataFrame()
 
     fwd_vols = []
     for i in range(len(df_vol)):
@@ -373,7 +385,7 @@ def fetch_multi_expiry_vol_structure(spot_price):
             fwd_vols.append(math.sqrt(var_diff / dt) * 100.0 if (var_diff > 0 and dt > 0) else v2 * 100.0)
 
     df_vol["Forward_Vol"] = fwd_vols
-    return df_vol
+    return df_vol, df_surf
 
 
 # ---------------------------------------------------------
@@ -878,7 +890,7 @@ elif df_oc is not None and not df_oc.empty:
 
     # ================= ROW 9: VOLATILITY TERM STRUCTURE =================
     r9_col1, r9_col2 = st.columns(2)
-    df_vol_struct = fetch_multi_expiry_vol_structure(spot_price)
+    df_vol_struct, df_surface = fetch_multi_expiry_vol_structure(spot_price)
 
     with r9_col1:
         st.markdown('<div class="chart-container"><div class="info-tooltip">ⓘ<span class="tooltip-text">Plots implied forward variance. Normal markets exhibit an upward slope (Contango). A downward slope (Backwardation) flags near-term fear and extreme panic pricing in front-month options.</span></div><div class="chart-title">Forward Vol Term Structure (4 Expiries)</div>', unsafe_allow_html=True)
@@ -931,7 +943,55 @@ elif df_oc is not None and not df_oc.empty:
         st.plotly_chart(fig_pain, use_container_width=True, key="chart_max_pain")
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # ================= ROW 11: WEBSOCKET HEAVYWEIGHT BASKET =================
+    # ================= ROW 11: OPENBULL OI TRACKER & GREEKS PROFILE =================
+    r11_col1, r11_col2 = st.columns(2)
+
+    with r11_col1:
+        st.markdown('<div class="chart-container"><div class="info-tooltip">ⓘ<span class="tooltip-text"><b>OpenBull OI Tracker:</b> Visualizes aggregate Call (Red) and Put (Green) Open Interest across strikes. Identifies absolute support and resistance walls.</span></div><div class="chart-title">OpenBull OI Tracker (CE/PE Profile)</div>', unsafe_allow_html=True)
+        fig_oi = go.Figure()
+        fig_oi.add_trace(go.Bar(x=df_filtered["Strike"], y=df_filtered["CE_OI"], name="Call OI", marker_color="#FF5252"))
+        fig_oi.add_trace(go.Bar(x=df_filtered["Strike"], y=df_filtered["PE_OI"], name="Put OI", marker_color="#00E676"))
+        fig_oi.add_vline(x=spot_price, line_dash="solid", line_color="#FFD700")
+        fig_oi.update_xaxes(range=[atm_strike - 550, atm_strike + 550], tickmode='array', tickvals=df_filtered["Strike"], ticktext=strike_labels, tickangle=-45, gridcolor="#2A2E39")
+        fig_oi.update_layout(barmode='group', template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", margin=dict(l=0, r=0, t=10, b=0), height=250, legend=dict(orientation="h", y=1.1))
+        st.plotly_chart(fig_oi, use_container_width=True, key="chart_oi_tracker")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with r11_col2:
+        st.markdown('<div class="chart-container"><div class="info-tooltip">ⓘ<span class="tooltip-text"><b>OpenBull Option Greeks:</b> Displays the distribution of Delta across the chain, overlaying the transition points where options flip from OTM to ITM.</span></div><div class="chart-title">OpenBull Option Greeks Profile (Delta)</div>', unsafe_allow_html=True)
+        fig_greeks = go.Figure()
+        fig_greeks.add_trace(go.Scatter(x=df_filtered["Strike"], y=df_filtered["CE_Delta"], name="Call Delta", line=dict(color="#00E676", width=2)))
+        fig_greeks.add_trace(go.Scatter(x=df_filtered["Strike"], y=df_filtered["PE_Delta"], name="Put Delta", line=dict(color="#FF5252", width=2)))
+        fig_greeks.add_vline(x=spot_price, line_dash="solid", line_color="#FFD700")
+        fig_greeks.update_xaxes(range=[atm_strike - 550, atm_strike + 550], tickmode='array', tickvals=df_filtered["Strike"], ticktext=strike_labels, tickangle=-45, gridcolor="#2A2E39")
+        fig_greeks.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", margin=dict(l=0, r=0, t=10, b=0), height=250, legend=dict(orientation="h", y=1.1))
+        st.plotly_chart(fig_greeks, use_container_width=True, key="chart_greeks")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    # ================= ROW 12: OPENBULL 3D VOLATILITY SURFACE =================
+    st.markdown('<div class="chart-container"><div class="info-tooltip">ⓘ<span class="tooltip-text"><b>OpenBull 3D Vol Surface:</b> Maps Implied Volatility across both Strikes (X) and Time to Expiry (Y). Institutional traders use this to spot duration mispricings and volatility arbitrage setups.</span></div><div class="chart-title">OpenBull 3D Volatility Surface</div>', unsafe_allow_html=True)
+    if not df_surface.empty:
+        pivot_surface = df_surface.pivot_table(index='Days', columns='Strike', values='IV', aggfunc='mean')
+        pivot_surface = pivot_surface.ffill(axis=1).bfill(axis=1).fillna(0)
+        x_strikes = pivot_surface.columns.tolist()
+        y_days = pivot_surface.index.tolist()
+        z_iv = pivot_surface.values
+
+        fig_surf = go.Figure(data=[go.Surface(z=z_iv, x=x_strikes, y=y_days, colorscale='Viridis', showscale=False)])
+        fig_surf.update_layout(
+            scene=dict(
+                xaxis=dict(title='Strike', gridcolor='#2A2E39', backgroundcolor='#14151A'),
+                yaxis=dict(title='Days to Expiry', gridcolor='#2A2E39', backgroundcolor='#14151A'),
+                zaxis=dict(title='Implied Vol', gridcolor='#2A2E39', backgroundcolor='#14151A')
+            ),
+            template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", margin=dict(l=0, r=0, t=30, b=0), height=450
+        )
+        st.plotly_chart(fig_surf, use_container_width=True, key="chart_vol_surface")
+    else:
+        st.info("Loading Expries for 3D Surface... (Requires 4 active chains)")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # ================= ROW 13: WEBSOCKET HEAVYWEIGHT BASKET =================
     st.markdown('<div class="chart-container"><div class="info-tooltip">ⓘ<span class="tooltip-text">Tracks the Basis (Futures - Spot) and the Cumulative Volume Delta of top index heavyweights via WebSocket. Validates the structural strength of breakouts.</span></div><div class="chart-title">Futures Basis & Heavyweight CVD Filter (Live WebSocket)</div>', unsafe_allow_html=True)
     
     nifty_fut = live_ws_data.get("NIFTY_FUT_LTP", 0.0)
@@ -969,7 +1029,7 @@ elif df_oc is not None and not df_oc.empty:
         
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # ================= ROW 12: INSTITUTIONAL PLAYBOOK EXPANDER =================
+    # ================= ROW 14: INSTITUTIONAL PLAYBOOK EXPANDER =================
     with st.expander("📖 Institutional Playbook: How to Trade Nifty Using Relative Option Demand", expanded=False):
         st.markdown("""
             Monitoring the **ATM IV Spread (IV_Call - IV_Put)** provides major advantages for intraday buyers:
@@ -1031,7 +1091,7 @@ elif df_oc is not None and not df_oc.empty:
             </div>
         """, unsafe_allow_html=True)
 
-    # ================= ROW 13: DATA GRID =================
+    # ================= ROW 15: DATA GRID =================
     st.markdown('<div class="chart-container"><div class="chart-title">Institutional Options Chain Grid</div>', unsafe_allow_html=True)
     grid_df = df_filtered[["Strike", "CE_LTP", "PE_LTP", "CE_OI", "PE_OI", "CE_Delta", "PE_Delta", "Net_Delta_OI", "Net_DEX", "Net_GEX", "Net_VEX", "Net_CHEX", "Net_SPEX", "CE_IV", "PE_IV", "IV_Spread"]].copy()
     st.dataframe(
