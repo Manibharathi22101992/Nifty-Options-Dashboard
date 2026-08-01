@@ -563,17 +563,39 @@ elif df_oc is not None and not df_oc.empty:
     # --- TOP SUMMARY METRIC CARDS ---
     m1, m2, m3, m4, m5, m6 = st.columns(6)
     m1.markdown(f'<div class="metric-card metric-card-amber"><div class="metric-title">NIFTY SYNTH FUT</div><div class="metric-value">₹{synthetic_future:,.2f}</div><div class="metric-sub sub-amber">Spot: ₹{spot_price:,.2f} | Pain: {max_pain_strike}</div></div>', unsafe_allow_html=True)
-    m2.markdown(f'<div class="metric-card {"metric-card-green" if target_iv_spread >= 0 else "metric-card-red"}"><div class="metric-title">{selected_target_strike} IV SPREAD</div><div class="metric-value">{target_iv_spread:+.2f}%</div><div class="metric-sub {"sub-green" if target_iv_spread >= 0 else "sub-red"}">CE {(target_row["CE_IV"].values[0]*100) if not target_row.empty else 0:.1f}% | PE {(target_row["PE_IV"].values[0]*100) if not target_row.empty else 0:.1f}%</div></div>', unsafe_allow_html=True)
+    
+    spread_card = "metric-card-green" if target_iv_spread >= 0 else "metric-card-red"
+    spread_sub = "sub-green" if target_iv_spread >= 0 else "sub-red"
+    ce_iv_val = (target_row["CE_IV"].values[0]*100) if not target_row.empty else 0.0
+    pe_iv_val = (target_row["PE_IV"].values[0]*100) if not target_row.empty else 0.0
+    m2.markdown(f'<div class="metric-card {spread_card}"><div class="metric-title">{selected_target_strike} IV SPREAD</div><div class="metric-value">{target_iv_spread:+.2f}%</div><div class="metric-sub {spread_sub}">CE {ce_iv_val:.1f}% | PE {pe_iv_val:.1f}%</div></div>', unsafe_allow_html=True)
+    
     dp_15m = pcr_df.iloc[-1]["Delta_PCR_15m"] if not pcr_df.empty else 0.0
-    m3.markdown(f'<div class="metric-card {"metric-card-green" if dp_15m >= 0.15 else ("metric-card-red" if dp_15m <= -0.15 else "metric-card-amber")}"><div class="metric-title">ΔPCR 15M VELOCITY</div><div class="metric-value">{dp_15m:+.2f}</div><div class="metric-sub {"sub-green" if dp_15m >= 0.15 else ("sub-red" if dp_15m <= -0.15 else "sub-amber")}">PCR: {pcr_df.iloc[-1]["PCR"] if not pcr_df.empty else 0:.2f}</div></div>', unsafe_allow_html=True)
-    m4.markdown(f'<div class="metric-card {"metric-card-green" if df_oc["Net_Delta_OI"].sum() >= 0 else "metric-card-red"}"><div class="metric-title">NET DELTA OI</div><div class="metric-value">{df_oc["Net_Delta_OI"].sum():+,.0f}</div><div class="metric-sub {"sub-green" if (doi_df.iloc[-1]["Delta_OI_ROC_1m"] if not doi_df.empty else 0) >= 0 else "sub-red"}">1m ROC: {doi_df.iloc[-1]["Delta_OI_ROC_1m"] if not doi_df.empty else 0:+,.0f}</div></div>', unsafe_allow_html=True)
-    m5.markdown(f'<div class="metric-card {"metric-card-green" if (strad_df.iloc[-1]["Regime"] if not strad_df.empty else "") == "VOL COIL 🟢" else "metric-card-amber"}"><div class="metric-title">STRADDLE DECAY</div><div class="metric-value">₹{strad_df.iloc[-1]["Actual_Straddle"] if not strad_df.empty else 0:.1f}</div><div class="metric-sub {"sub-green" if (strad_df.iloc[-1]["Regime"] if not strad_df.empty else "") == "VOL COIL 🟢" else "sub-amber"}">{strad_df.iloc[-1]["Regime"] if not strad_df.empty else "NORMAL"}</div></div>', unsafe_allow_html=True)
-    m6.markdown(f'<div class="metric-card {z_col}"><div class="metric-title">Z-GEX SCORE</div><div class="metric-value">{cz_gex:+.2f}</div><div class="metric-sub {"sub-red" if cz_gex < -2.0 else ("sub-green" if -1.0 <= cz_gex <= 1.0 else "sub-amber")}">{"GAMMA COLLAPSE" if cz_gex < -2.0 else ("NORMAL DAMPENING" if -1.0 <= cz_gex <= 1.0 else "TRANSITION ZONE")}</div></div>', unsafe_allow_html=True)
+    pcr_card = "metric-card-green" if dp_15m >= 0.15 else ("metric-card-red" if dp_15m <= -0.15 else "metric-card-amber")
+    pcr_sub = "sub-green" if dp_15m >= 0.15 else ("sub-red" if dp_15m <= -0.15 else "sub-amber")
+    pcr_val = pcr_df.iloc[-1]["PCR"] if not pcr_df.empty else 0.0
+    m3.markdown(f'<div class="metric-card {pcr_card}"><div class="metric-title">ΔPCR 15M VELOCITY</div><div class="metric-value">{dp_15m:+.2f}</div><div class="metric-sub {pcr_sub}">PCR: {pcr_val:.2f}</div></div>', unsafe_allow_html=True)
+    
+    t_net_doi = df_oc["Net_Delta_OI"].sum()
+    doi_roc_1m = doi_df.iloc[-1]["Delta_OI_ROC_1m"] if not doi_df.empty else 0.0
+    doi_card = "metric-card-green" if t_net_doi >= 0 else "metric-card-red"
+    doi_sub = "sub-green" if doi_roc_1m >= 0 else "sub-red"
+    m4.markdown(f'<div class="metric-card {doi_card}"><div class="metric-title">NET DELTA OI</div><div class="metric-value">{t_net_doi:+,.0f}</div><div class="metric-sub {doi_sub}">1m ROC: {doi_roc_1m:+,.0f}</div></div>', unsafe_allow_html=True)
+    
+    strad_reg = strad_df.iloc[-1]["Regime"] if not strad_df.empty else "NORMAL"
+    strad_val = strad_df.iloc[-1]["Actual_Straddle"] if not strad_df.empty else 0.0
+    strad_card = "metric-card-green" if "COIL" in strad_reg else "metric-card-amber"
+    strad_sub = "sub-green" if "COIL" in strad_reg else "sub-amber"
+    m5.markdown(f'<div class="metric-card {strad_card}"><div class="metric-title">STRADDLE DECAY</div><div class="metric-value">₹{strad_val:.1f}</div><div class="metric-sub {strad_sub}">{strad_reg}</div></div>', unsafe_allow_html=True)
+    
+    z_card = "metric-card-red" if cz_gex < -2.0 else ("metric-card-green" if -1.0 <= cz_gex <= 1.0 else "metric-card-amber")
+    z_sub = "sub-red" if cz_gex < -2.0 else ("sub-green" if -1.0 <= cz_gex <= 1.0 else "sub-amber")
+    z_sig_text = "GAMMA COLLAPSE" if cz_gex < -2.0 else ("NORMAL DAMPENING" if -1.0 <= cz_gex <= 1.0 else "TRANSITION ZONE")
+    m6.markdown(f'<div class="metric-card {z_card}"><div class="metric-title">Z-GEX SCORE</div><div class="metric-value">{cz_gex:+.2f}</div><div class="metric-sub {z_sub}">{z_sig_text}</div></div>', unsafe_allow_html=True)
 
     # --- HORIZONTAL AGGREGATE METRICS WITH DYNAMIC SENTIMENT INTERPRETATIONS ---
     st.markdown('<div class="chart-title" style="margin-top:10px;">Aggregate Options Flow (Total PE vs CE)</div>', unsafe_allow_html=True)
     
-    # Calculate Aggregate Balances and Sentiment Tags
     tot_pe_oi, tot_ce_oi = df_filtered["PE_OI"].sum(), df_filtered["CE_OI"].sum()
     oi_interp = "🟢 Uptrend / Strong Support" if tot_pe_oi > tot_ce_oi * 1.15 else ("🔴 Downtrend / Resistance" if tot_ce_oi > tot_pe_oi * 1.15 else "⚪ Balanced Structure")
     oi_col = "#00E676" if "Uptrend" in oi_interp else ("#FF5252" if "Downtrend" in oi_interp else "#8A93A6")
@@ -606,7 +628,6 @@ elif df_oc is not None and not df_oc.empty:
     h5.plotly_chart(create_h_bar("Vega Exp (VEX)", tot_pe_vex, tot_ce_vex, vex_interp, vex_col), use_container_width=True)
     h6.plotly_chart(create_h_bar("Gamma Exp (GEX)", tot_put_gex, tot_call_gex, gex_interp, gex_col), use_container_width=True)
 
-
     # 8C. TABBED INTERFACE
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "🚀 Intraday Flow Center", 
@@ -637,7 +658,7 @@ elif df_oc is not None and not df_oc.empty:
 
         r2c1, r2c2 = st.columns(2)
         with r2c1:
-            st.markdown('<div class="chart-container"><div class="chart-title">OpenBull Cumulative OI Trend (Cr)</div>', unsafe_allow_html=True)
+            st.markdown('<div class="chart-container"><div class="chart-title">Cumulative Open Interest Trend (Cr)</div>', unsafe_allow_html=True)
             fig_oi_trend = go.Figure()
             if not pcr_df.empty:
                 fig_oi_trend.add_trace(go.Scatter(x=pcr_df["Time"], y=pcr_df["Total_PE_OI"]/1e7, mode="lines", name="Put OI (PE)", line=dict(color="#FF5252", width=2)))
