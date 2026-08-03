@@ -37,7 +37,9 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-    .stApp { background-color: #0A0A0A; color: #D1D4DC; font-family: 'Inter', sans-serif; }
+    /* Mobile Scroll Fix & Master CSS */
+    html, body { overflow-x: hidden; -webkit-overflow-scrolling: touch; }
+    .stApp { background-color: #0A0A0A; color: #D1D4DC; font-family: 'Inter', sans-serif; overflow-x: hidden; }
     section[data-testid="stSidebar"] { background-color: #111115 !important; border-right: 1px solid #2A2E39; }
     
     .metric-card {
@@ -129,8 +131,8 @@ NIFTY_50_WEIGHTS = {
     "LTIM.NS": 0.4, "HDFCLIFE.NS": 0.4, "TATACONSUM.NS": 0.4, "UPL.NS": 0.3, "SHREECEM.NS": 0.3
 }
 
-# Universal plot config for stretching and zooming
-PLOT_CONFIG = {'scrollZoom': True, 'displayModeBar': True}
+# Plotly config optimized for Mobile Scrolling (Touch Drag = Scroll Page, Box Select = Zoom)
+PLOT_CONFIG = {'displayModeBar': True, 'scrollZoom': False}
 
 # ---------------------------------------------------------
 # 3. HELPERS & ALERTS
@@ -142,7 +144,7 @@ def apply_dark_layout(fig, height=250, is_strike_axis=False, df_filtered=None, a
     )
     if is_strike_axis and df_filtered is not None and not df_filtered.empty and atm_strike is not None:
         strike_labels = df_filtered["Strike"].astype(str).tolist()
-        fig.update_xaxes(tickmode='array', tickvals=df_filtered["Strike"], ticktext=strike_labels, tickangle=-45, gridcolor="#2A2E39", zerolinecolor="#2A2E39", tickfont=dict(size=10, color="#D1D4DC"))
+        fig.update_xaxes(range=[atm_strike - 550, atm_strike + 550], tickmode='array', tickvals=df_filtered["Strike"], ticktext=strike_labels, tickangle=-45, gridcolor="#2A2E39", zerolinecolor="#2A2E39", tickfont=dict(size=10, color="#D1D4DC"))
     else:
         fig.update_xaxes(gridcolor="#2A2E39", zerolinecolor="#2A2E39", tickfont=dict(size=10))
     fig.update_yaxes(gridcolor="#2A2E39", zerolinecolor="#2A2E39", tickfont=dict(size=10))
@@ -280,40 +282,6 @@ def start_dhan_websocket(client_id, access_token):
 
 live_ws_data = start_dhan_websocket(CLIENT_ID, ACCESS_TOKEN)
 
-# BACKGROUND DAEMON: Collects Data Even If Browser Is Closed
-@st.cache_resource
-def start_background_daemon():
-    def daemon_loop():
-        while True:
-            now_ist = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5, minutes=30)))
-            m_open, m_close = now_ist.replace(hour=9, minute=15, second=0, microsecond=0), now_ist.replace(hour=15, minute=30, second=0, microsecond=0)
-            is_live = now_ist.weekday() < 5 and (m_open <= now_ist <= m_close)
-            
-            if is_live:
-                try:
-                    df_oc, spot_pr, _ = fetch_gex_option_chain(selected_expiry)
-                    if df_oc is not None and not df_oc.empty:
-                        now_ts = int(time.time())
-                        today_str = now_ist.strftime("%Y-%m-%d")
-                        
-                        # 1. Update Absorption Memory
-                        abs_df = get_persisted_df("absorption_history", ["Date", "Timestamp", "Spot", "Fut_LTP", "CE_OI", "PE_OI", "CE_Vol", "PE_Vol"])
-                        if abs_df.empty or (now_ts - abs_df["Timestamp"].max() >= 60):
-                            new_abs = pd.DataFrame([{"Date": today_str, "Timestamp": now_ts, "Spot": spot_pr, "Fut_LTP": live_ws_data.get("NIFTY_FUT_LTP", spot_pr), "CE_OI": df_oc["CE_OI"].sum(), "PE_OI": df_oc["PE_OI"].sum(), "CE_Vol": df_oc["CE_Vol"].sum(), "PE_Vol": df_oc["PE_Vol"].sum()}])
-                            save_persisted_df(pd.concat([abs_df, new_abs], ignore_index=True), "absorption_history")
-                        
-                        # 2. Update OI Snapshots
-                        oi_snap = get_persisted_df("oi_snapshots", ["Date", "Timestamp", "Strike", "CE_OI", "PE_OI", "CE_LTP", "PE_LTP"])
-                        if oi_snap.empty or (now_ts - oi_snap["Timestamp"].max() >= 60):
-                            new_snap = df_oc[["Strike", "CE_OI", "PE_OI", "CE_LTP", "PE_LTP"]].copy()
-                            new_snap["Timestamp"] = now_ts; new_snap["Date"] = today_str
-                            save_persisted_df(pd.concat([oi_snap, new_snap], ignore_index=True), "oi_snapshots")
-                except: pass
-            time.sleep(60) # Run every 60 seconds
-    
-    threading.Thread(target=daemon_loop, daemon=True).start()
-    return True
-
 # ---------------------------------------------------------
 # 4. BLACK-SCHOLES GREEK ENGINE (Nifty 65 Precision)
 # ---------------------------------------------------------
@@ -382,14 +350,9 @@ def fetch_gex_option_chain(expiry_date):
     except Exception as e: return None, 0.0, f"Connection Error: {str(e)}"
 
 @st.cache_data(ttl=120)
-def fetch_multi_expiry_vol_structure(spot_price):
-    try:
-        res = requests.post("https://api.dhan.co/v2/optionchain/expirylist", headers={"client-id": CLIENT_ID, "access-token": ACCESS_TOKEN, "Content-Type": "application/json"}, json={"UnderlyingScrip": 13, "UnderlyingSeg": "IDX_I"}, timeout=5)
-        expiries = res.json().get("data", [])[:4] if res.status_code == 200 else []
-    except: expiries = []
-
+def fetch_multi_expiry_vol_structure(spot_price, valid_exp_list):
     vol_data, surface_data = [], []
-    for idx, exp in enumerate(expiries):
+    for idx, exp in enumerate(valid_exp_list):
         if idx > 0: time.sleep(1.2)
         df_exp, exp_spot, _ = fetch_gex_option_chain(exp)
         if df_exp is not None and not df_exp.empty:
@@ -399,21 +362,62 @@ def fetch_multi_expiry_vol_structure(spot_price):
             exp_atm = int(round(exp_synth / 50) * 50)
             atm_row = df_exp[df_exp["Strike"] == exp_atm]
             mean_iv = ( (atm_row["CE_IV"].values[0] if not atm_row.empty else df_exp["CE_IV"].mean()) + (atm_row["PE_IV"].values[0] if not atm_row.empty else df_exp["PE_IV"].mean()) ) / 2.0
-            days = max((datetime.datetime.strptime(exp, "%Y-%m-%d").date() - datetime.date.today()).days, 1)
+            
+            try: exp_date_obj = datetime.datetime.strptime(exp[:10], "%Y-%m-%d").date()
+            except: continue
+            
+            days = max((exp_date_obj - datetime.date.today()).days, 1)
 
-            vol_data.append({"Expiry": datetime.datetime.strptime(exp, "%Y-%m-%d").strftime("%d %b"), "Days": days, "Tenor_Years": days / 365.0, "Mean_IV": mean_iv})
+            vol_data.append({"Expiry": exp_date_obj.strftime("%d %b"), "Days": days, "Tenor_Years": days / 365.0, "Mean_IV": max(mean_iv, 0.01)})
             for _, r in df_exp.iterrows():
                 if exp_atm - 600 <= r["Strike"] <= exp_atm + 600: surface_data.append({"Expiry": exp, "Days": days, "Strike": r["Strike"], "IV": (r["CE_IV"] + r["PE_IV"]) / 2.0})
 
     df_vol, df_surf = pd.DataFrame(vol_data), pd.DataFrame(surface_data)
     if not df_vol.empty and len(df_vol) > 1:
+        df_vol = df_vol.sort_values("Tenor_Years").reset_index(drop=True)
         fwd_vols = [df_vol.loc[0, "Mean_IV"]]
         for i in range(1, len(df_vol)):
             t1, t2, v1, v2 = df_vol.loc[i-1, "Tenor_Years"], df_vol.loc[i, "Tenor_Years"], df_vol.loc[i-1, "Mean_IV"]/100.0, df_vol.loc[i, "Mean_IV"]/100.0
             var_diff, dt = (v2**2 * t2) - (v1**2 * t1), t2 - t1
-            fwd_vols.append(math.sqrt(var_diff / dt) * 100.0 if (var_diff > 0 and dt > 0) else v2 * 100.0)
+            fwd_vols.append(math.sqrt(max(var_diff, 0) / dt) * 100.0 if dt > 0 else v2 * 100.0)
         df_vol["Forward_Vol"] = fwd_vols
     return df_vol, df_surf
+
+
+# BACKGROUND DAEMON: Collects Data Even If Browser Is Closed
+@st.cache_resource
+def start_background_daemon(selected_expiry_daemon):
+    def daemon_loop():
+        while True:
+            now_ist = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5, minutes=30)))
+            m_open, m_close = now_ist.replace(hour=9, minute=15, second=0, microsecond=0), now_ist.replace(hour=15, minute=30, second=0, microsecond=0)
+            is_live = now_ist.weekday() < 5 and (m_open <= now_ist <= m_close)
+            
+            if is_live:
+                try:
+                    df_oc, spot_pr, _ = fetch_gex_option_chain(selected_expiry_daemon)
+                    if df_oc is not None and not df_oc.empty:
+                        now_ts = int(time.time())
+                        today_str = now_ist.strftime("%Y-%m-%d")
+                        
+                        # 1. Update Absorption Memory
+                        abs_df = get_persisted_df("absorption_history", ["Date", "Timestamp", "Spot", "Fut_LTP", "CE_OI", "PE_OI", "CE_Vol", "PE_Vol"])
+                        if abs_df.empty or (now_ts - abs_df["Timestamp"].max() >= 60):
+                            new_abs = pd.DataFrame([{"Date": today_str, "Timestamp": now_ts, "Spot": spot_pr, "Fut_LTP": live_ws_data.get("NIFTY_FUT_LTP", spot_pr), "CE_OI": df_oc["CE_OI"].sum(), "PE_OI": df_oc["PE_OI"].sum(), "CE_Vol": df_oc["CE_Vol"].sum(), "PE_Vol": df_oc["PE_Vol"].sum()}])
+                            save_persisted_df(pd.concat([abs_df, new_abs], ignore_index=True), "absorption_history")
+                        
+                        # 2. Update OI Snapshots
+                        oi_snap = get_persisted_df("oi_snapshots", ["Date", "Timestamp", "Strike", "CE_OI", "PE_OI", "CE_LTP", "PE_LTP"])
+                        if oi_snap.empty or (now_ts - oi_snap["Timestamp"].max() >= 60):
+                            new_snap = df_oc[["Strike", "CE_OI", "PE_OI", "CE_LTP", "PE_LTP"]].copy()
+                            new_snap["Timestamp"] = now_ts; new_snap["Date"] = today_str
+                            save_persisted_df(pd.concat([oi_snap, new_snap], ignore_index=True), "oi_snapshots")
+                except: pass
+            time.sleep(60) # Run every 60 seconds
+    
+    threading.Thread(target=daemon_loop, daemon=True).start()
+    return True
+
 
 # ---------------------------------------------------------
 # 6. SESSION & LIVE ENGINE INITIALIZATION
@@ -425,9 +429,6 @@ today_date_str, now_time_str = now_ist.strftime("%Y-%m-%d"), now_ist.strftime("%
 m_open, m_close = now_ist.replace(hour=9, minute=15, second=0, microsecond=0), now_ist.replace(hour=15, minute=30, second=0, microsecond=0)
 is_market_live = now_ist.weekday() < 5 and (m_open <= now_ist <= m_close)
 
-# Boot the daemon once globally per Streamlit server lifespan
-daemon_running = start_background_daemon()
-
 auto_refresh = st.sidebar.checkbox("Live Auto-Refresh (5s)", value=True)
 if auto_refresh and is_market_live: st_autorefresh(interval=5000, key="datarefresh")
 elif not is_market_live: st.sidebar.info("Market Closed. Dashboard in Static Review Mode.")
@@ -435,6 +436,9 @@ elif not is_market_live: st.sidebar.info("Market Closed. Dashboard in Static Rev
 try: valid_expiries = requests.post("https://api.dhan.co/v2/optionchain/expirylist", headers={"client-id": CLIENT_ID, "access-token": ACCESS_TOKEN, "Content-Type": "application/json"}, json={"UnderlyingScrip": 13, "UnderlyingSeg": "IDX_I"}, timeout=5).json().get("data", [])
 except: valid_expiries = []
 selected_expiry = st.sidebar.selectbox("Primary Expiry", valid_expiries) if valid_expiries else st.sidebar.date_input("Primary Expiry").strftime("%Y-%m-%d")
+
+# Boot the background daemon using the selected expiry
+daemon_running = start_background_daemon(selected_expiry)
 
 df_oc, spot_price, error_remark = fetch_gex_option_chain(selected_expiry)
 
@@ -519,6 +523,58 @@ elif df_oc is not None and not df_oc.empty:
     doi_df = get_persisted_df("delta_oi_history", ["Date", "Timestamp_dt", "Time", "Total_Net_Delta_OI", "Delta_OI_ROC_1m", "Total_Net_DEX", "DEX_Vel_5m"])
     strad_df = get_persisted_df("straddle_history", ["Date", "Time", "Elapsed_Mins", "Actual_Straddle", "Expected_Straddle", "Regime", "Straddle_VWAP"])
     
+    # Live updating the active session state if live
+    if is_market_live:
+        if st.session_state["iv_spread_history"].empty or st.session_state["iv_spread_history"].iloc[-1]["Time"] != now_time_str:
+            new_ticks = [{"Date": today_date_str, "Time": now_time_str, "Strike": r["Strike"], "CE_IV": r["CE_IV"], "PE_IV": r["PE_IV"], "IV_Spread": r["IV_Spread"], "Spot": spot_price} for _, r in df_filtered.iterrows()]
+            st.session_state["iv_spread_history"] = pd.concat([st.session_state["iv_spread_history"], pd.DataFrame(new_ticks)], ignore_index=True)
+            save_persisted_df(st.session_state["iv_spread_history"], "iv_spread_history")
+            iv_hist = st.session_state["iv_spread_history"]
+        
+        current_pcr = total_pe_oi_sum / total_ce_oi_sum if total_ce_oi_sum > 0 else 0.0
+        vol_pcr = df_oc["PE_Vol"].sum() / df_oc["CE_Vol"].sum() if df_oc["CE_Vol"].sum() > 0 else 0.0
+        
+        if pcr_df.empty or pcr_df.iloc[-1]["Time"] != now_time_str:
+            dp_15m = current_pcr - pcr_df[pcr_df["Timestamp_dt"] <= now_ist - datetime.timedelta(minutes=15)].iloc[-1]["PCR"] if not pcr_df[pcr_df["Timestamp_dt"] <= now_ist - datetime.timedelta(minutes=15)].empty else 0.0
+            st.session_state["pcr_history"] = pd.concat([pcr_df, pd.DataFrame([{"Date": today_date_str, "Timestamp_dt": now_ist, "Time": now_time_str, "PCR": current_pcr, "Vol_PCR": vol_pcr, "Delta_PCR_5m": 0.0, "Delta_PCR_15m": dp_15m, "Total_CE_OI": total_ce_oi_sum, "Total_PE_OI": total_pe_oi_sum}])], ignore_index=True)
+            save_persisted_df(st.session_state["pcr_history"], "pcr_history")
+            pcr_df = st.session_state["pcr_history"]
+
+        if gex_df.empty or gex_df.iloc[-1]["Time"] != now_time_str:
+            z_gex = (df_oc["Net_GEX"].sum() - gex_df["Total_Net_GEX"].tail(20).mean()) / gex_df["Total_Net_GEX"].tail(20).std() if len(gex_df) >= 2 and gex_df["Total_Net_GEX"].tail(20).std() > 0 else 0.0
+            st.session_state["gex_history"] = pd.concat([gex_df, pd.DataFrame([{"Date": today_date_str, "Timestamp_dt": now_ist, "Time": now_time_str, "Total_Net_GEX": df_oc["Net_GEX"].sum(), "Z_GEX": z_gex, "Flip_Strike": gamma_flip_strike, "Spot": spot_price, "Max_Pain": max_pain_strike}])], ignore_index=True)
+            save_persisted_df(st.session_state["gex_history"], "gex_history")
+            gex_df = st.session_state["gex_history"]
+
+        if synth_df.empty or synth_df.iloc[-1]["Time"] != now_time_str:
+            r_m50, r_atm, r_p50 = df_oc[df_oc["Strike"] == strike_m50], df_oc[df_oc["Strike"] == atm_strike], df_oc[df_oc["Strike"] == strike_p50]
+            s_m50 = strike_m50 + r_m50["CE_LTP"].values[0] - r_m50["PE_LTP"].values[0] if not r_m50.empty else spot_price
+            s_atm = atm_strike + r_atm["CE_LTP"].values[0] - r_atm["PE_LTP"].values[0] if not r_atm.empty else spot_price
+            s_p50 = strike_p50 + r_p50["CE_LTP"].values[0] - r_p50["PE_LTP"].values[0] if not r_p50.empty else spot_price
+            st.session_state["synth_history"] = pd.concat([synth_df, pd.DataFrame([{"Date": today_date_str, "Time": now_time_str, "Spot": spot_price, "Strike_M50": strike_m50, "Strike_ATM": atm_strike, "Strike_P50": strike_p50, "Synth_M50": s_m50, "Synth_ATM": s_atm, "Synth_P50": s_p50, "PCP_Dev_Mean": ((s_m50 - spot_price) + (s_atm - spot_price) + (s_p50 - spot_price)) / 3.0}])], ignore_index=True)
+            save_persisted_df(st.session_state["synth_history"], "synth_history")
+            synth_df = st.session_state["synth_history"]
+
+        if doi_df.empty or doi_df.iloc[-1]["Time"] != now_time_str:
+            d_roc_1m = df_oc["Net_Delta_OI"].sum() - doi_df[doi_df["Timestamp_dt"] <= now_ist - datetime.timedelta(minutes=1)].iloc[-1]["Total_Net_Delta_OI"] if not doi_df[doi_df["Timestamp_dt"] <= now_ist - datetime.timedelta(minutes=1)].empty else 0.0
+            dex_vel = (df_oc["Net_DEX"].sum()) - doi_df[doi_df["Timestamp_dt"] <= now_ist - datetime.timedelta(minutes=5)].iloc[-1]["Total_Net_DEX"] if not doi_df[doi_df["Timestamp_dt"] <= now_ist - datetime.timedelta(minutes=5)].empty else 0.0
+            st.session_state["delta_oi_history"] = pd.concat([doi_df, pd.DataFrame([{"Date": today_date_str, "Timestamp_dt": now_ist, "Time": now_time_str, "Total_Net_Delta_OI": df_oc["Net_Delta_OI"].sum(), "Delta_OI_ROC_1m": d_roc_1m, "Total_Net_DEX": df_oc["Net_DEX"].sum(), "DEX_Vel_5m": dex_vel}])], ignore_index=True)
+            save_persisted_df(st.session_state["delta_oi_history"], "delta_oi_history")
+            doi_df = st.session_state["delta_oi_history"]
+
+        if strad_df.empty or strad_df.iloc[-1]["Time"] != now_time_str:
+            r_atm_cur = df_oc[df_oc["Strike"] == atm_strike]
+            c_strad = (r_atm_cur["CE_LTP"].values[0] if not r_atm_cur.empty else 0.0) + (r_atm_cur["PE_LTP"].values[0] if not r_atm_cur.empty else 0.0)
+            e_mins = max(0, min((now_ist - m_open).total_seconds() / 60.0, 375)) 
+            if e_mins >= 5.0 and st.session_state["straddle_anchor_price"] is None: st.session_state["straddle_anchor_price"] = c_strad
+            e_strad = (st.session_state["straddle_anchor_price"] or c_strad) * (1 - (0.15 * math.sqrt(e_mins / 375)))
+            prev_vwap = strad_df.iloc[-1]["Straddle_VWAP"] if not strad_df.empty and "Straddle_VWAP" in strad_df.columns else c_strad
+            strad_vwap = ((prev_vwap * max(1, len(strad_df))) + c_strad) / (len(strad_df) + 1)
+            regime = "VOL COIL 🟢" if c_strad > e_strad + 2.0 else ("IV CRUSH 🔴" if c_strad < e_strad - 2.0 else "NORMAL DECAY")
+            st.session_state["straddle_history"] = pd.concat([strad_df, pd.DataFrame([{"Date": today_date_str, "Time": now_time_str, "Elapsed_Mins": e_mins, "Actual_Straddle": c_strad, "Expected_Straddle": e_strad, "Regime": regime, "Straddle_VWAP": strad_vwap}])], ignore_index=True)
+            save_persisted_df(st.session_state["straddle_history"], "straddle_history")
+            strad_df = st.session_state["straddle_history"]
+
     # ---------------------------------------------------------
     # 8. DASHBOARD UI RENDERING
     # ---------------------------------------------------------
@@ -1000,7 +1056,7 @@ elif df_oc is not None and not df_oc.empty:
             st.markdown('</div>', unsafe_allow_html=True)
 
         v3, v4 = st.columns(2)
-        df_vol_struct, df_surface = fetch_multi_expiry_vol_structure(spot_price)
+        df_vol_struct, df_surface = fetch_multi_expiry_vol_structure(spot_price, valid_expiries[:4] if len(valid_expiries) > 0 else [selected_expiry])
         
         with v3:
             st.markdown('<div class="chart-container"><div class="chart-title">Forward Vol Term Structure (4 Expiries)</div>', unsafe_allow_html=True)
