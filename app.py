@@ -12,6 +12,7 @@ import requests
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
+# Graceful fallbacks
 try:
     from dhanhq import marketfeed
     DHAN_WS_AVAILABLE = True
@@ -182,7 +183,6 @@ def process_camarilla_alerts(df_camarilla):
         w = row["Weight"]
         ltp = row["LTP"]
         
-        # Test S3 Support (Within 0.15% threshold)
         if row["Dist_S3_%"] <= 0.15:
             key = f"{sym}_S3"
             if current_ts - st.session_state["telegram_cooldowns"].get(key, 0) > cooldown:
@@ -190,7 +190,6 @@ def process_camarilla_alerts(df_camarilla):
                 send_telegram_alert(msg)
                 st.session_state["telegram_cooldowns"][key] = current_ts
                 
-        # Test R3 Resistance (Within 0.15% threshold)
         elif row["Dist_R3_%"] <= 0.15:
             key = f"{sym}_R3"
             if current_ts - st.session_state["telegram_cooldowns"].get(key, 0) > cooldown:
@@ -316,10 +315,13 @@ def fetch_gex_option_chain(expiry_date):
                 put_gex = -pe_oi * NIFTY_LOT_SIZE * pe_gamma * (spot_price**2) * 0.01 / 1e5
                 ce_dex = ce_oi * NIFTY_LOT_SIZE * ce_delta * spot_price / 1e5
                 pe_dex = pe_oi * NIFTY_LOT_SIZE * pe_delta * spot_price / 1e5
+                
                 ce_vex = ce_oi * NIFTY_LOT_SIZE * ce_vanna * spot_price * 0.01 / 1e5
                 pe_vex = pe_oi * NIFTY_LOT_SIZE * pe_vanna * spot_price * 0.01 / 1e5
+                
                 ce_chex = ce_oi * NIFTY_LOT_SIZE * ce_charm * (1.0/365.0) * spot_price / 1e5
                 pe_chex = pe_oi * NIFTY_LOT_SIZE * pe_charm * (1.0/365.0) * spot_price / 1e5
+                
                 ce_spex = ce_oi * NIFTY_LOT_SIZE * ce_speed * (spot_price**3) * 0.0001 / 1e5
                 pe_spex = pe_oi * NIFTY_LOT_SIZE * pe_speed * (spot_price**3) * 0.0001 / 1e5
 
@@ -354,6 +356,7 @@ def fetch_multi_expiry_vol_structure(spot_price):
             temp_row = df_exp[df_exp["Strike"] == temp_spot_atm]
             exp_synth = temp_spot_atm + temp_row["CE_LTP"].values[0] - temp_row["PE_LTP"].values[0] if not temp_row.empty else exp_spot
             exp_atm = int(round(exp_synth / 50) * 50)
+            
             atm_row = df_exp[df_exp["Strike"] == exp_atm]
             mean_iv = ( (atm_row["CE_IV"].values[0] if not atm_row.empty else df_exp["CE_IV"].mean()) + (atm_row["PE_IV"].values[0] if not atm_row.empty else df_exp["PE_IV"].mean()) ) / 2.0
             days = max((datetime.datetime.strptime(exp, "%Y-%m-%d").date() - datetime.date.today()).days, 1)
@@ -423,8 +426,7 @@ if st.sidebar.button("🗑️ Reset Session Cache"):
     for key in ["absorption_history", "oi_snapshots", "iv_spread_history", "pcr_history", "gex_history", "synth_history", "delta_oi_history", "straddle_history"]:
         st.session_state[key] = pd.DataFrame(columns=st.session_state[key].columns)
     st.session_state["chain_snapshots"] = {}; st.session_state["last_chain_snap_ts"] = 0; st.session_state["straddle_anchor_price"] = None
-    st.cache_data.clear()
-    st.rerun()
+    st.cache_data.clear(); st.rerun()
 
 # ---------------------------------------------------------
 # 6. DATA ENGINE PROCESSING
@@ -608,7 +610,7 @@ elif df_oc is not None and not df_oc.empty:
     h5.plotly_chart(create_h_bar("Vega Exp (VEX)", tot_pe_vex, tot_ce_vex, vex_interp, vex_col), use_container_width=True)
     h6.plotly_chart(create_h_bar("Gamma Exp (GEX)", tot_put_gex, tot_call_gex, gex_interp, gex_col), use_container_width=True)
 
-    # 8C. TABBED INTERFACE
+    # 8. TABBED INTERFACE (EXACTLY 7 TABS ONCE)
     tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
         "🚀 Intraday Flow Center", 
         "🧮 OI Flow & Buildup",
@@ -696,6 +698,22 @@ elif df_oc is not None and not df_oc.empty:
                 fig_pcr_t.add_trace(go.Scatter(x=pcr_df["Time"], y=pcr_df["PCR"], mode="lines", name="OI PCR", line=dict(color="#29B6F6", width=2)))
                 if "Vol_PCR" in pcr_df.columns: fig_pcr_t.add_trace(go.Scatter(x=pcr_df["Time"], y=pcr_df["Vol_PCR"], mode="lines", name="Vol PCR", line=dict(color="#FFA726", width=2)))
             st.plotly_chart(apply_dark_layout(fig_pcr_t), use_container_width=True, key="c_pcrt")
+            st.markdown('</div>', unsafe_allow_html=True)
+
+        r3c1, r3c2 = st.columns(2)
+        with r3c1:
+            st.markdown('<div class="chart-container"><div class="chart-title">Real-Time Delta-Weighted Net OI</div>', unsafe_allow_html=True)
+            fig_doi = go.Figure()
+            if not doi_df.empty: fig_doi.add_trace(go.Scatter(x=doi_df["Time"], y=doi_df["Total_Net_Delta_OI"], mode="lines", fill='tozeroy', line=dict(color="#00E676", width=2)))
+            fig_doi.add_hline(y=0, line_dash="dash", line_color="white", opacity=0.3)
+            st.plotly_chart(apply_dark_layout(fig_doi), use_container_width=True, key="c_doi")
+            st.markdown('</div>', unsafe_allow_html=True)
+        with r3c2:
+            st.markdown('<div class="chart-container"><div class="chart-title">Dealer Delta Velocity (DEX 5m ROC)</div>', unsafe_allow_html=True)
+            fig_dvel = go.Figure()
+            if not doi_df.empty: fig_dvel.add_trace(go.Bar(x=doi_df["Time"], y=doi_df["DEX_Vel_5m"], marker_color=["#00E676" if v >= 0 else "#FF5252" for v in doi_df["DEX_Vel_5m"]]))
+            fig_dvel.add_hline(y=0, line_dash="dash", line_color="white", opacity=0.3)
+            st.plotly_chart(apply_dark_layout(fig_dvel), use_container_width=True, key="c_dvel")
             st.markdown('</div>', unsafe_allow_html=True)
 
     with tab2: # OI FLOW & BUILDUP
