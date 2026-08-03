@@ -166,6 +166,7 @@ def create_h_bar(title, put_val, call_val, interp_text="", interp_color="#8A93A6
     return fig
 
 def get_oi_build_status(dl_p, dl_oi, is_call):
+    """Returns: Status Text, Background RGBA, Text Hex Color, Mathematical Score"""
     if is_call:
         if dl_p > 0 and dl_oi > 0: return "Long Buildup", "rgba(0, 230, 118, 0.15)", "#00E676", 1
         elif dl_p < 0 and dl_oi > 0: return "Short Buildup", "rgba(255, 82, 82, 0.15)", "#FF5252", -1
@@ -379,7 +380,6 @@ selected_expiry = st.sidebar.selectbox("Primary Expiry", valid_expiries) if vali
 
 df_oc, spot_price, error_remark = fetch_gex_option_chain(selected_expiry)
 
-# TRUE ATM Calculation Anchored to Synthetic Future Price
 synthetic_future = spot_price
 if df_oc is not None and not df_oc.empty:
     spot_atm = int(round(spot_price / 50) * 50)
@@ -516,7 +516,6 @@ elif df_oc is not None and not df_oc.empty:
             if e_mins >= 5.0 and st.session_state["straddle_anchor_price"] is None: st.session_state["straddle_anchor_price"] = c_strad
             e_strad = (st.session_state["straddle_anchor_price"] or c_strad) * (1 - (0.15 * math.sqrt(e_mins / 375)))
             
-            # Cumulative Straddle VWAP Calculation
             cum_vol = (df_oc["CE_Vol"].sum() + df_oc["PE_Vol"].sum())
             prev_vwap = strad_df.iloc[-1]["Straddle_VWAP"] if not strad_df.empty and "Straddle_VWAP" in strad_df.columns else c_strad
             strad_vwap = ((prev_vwap * max(1, len(strad_df))) + c_strad) / (len(strad_df) + 1)
@@ -747,13 +746,13 @@ elif df_oc is not None and not df_oc.empty:
             net_score = 0
             
             for _, r in b_df.iterrows():
-                st_ce, col_ce, scr_ce = get_oi_build_status(r["CE_P_Chg"], r["CE_O_Chg"], True)
-                st_pe, col_pe, scr_pe = get_oi_build_status(r["PE_P_Chg"], r["PE_O_Chg"], False)
+                st_ce, bg_ce, col_ce, scr_ce = get_oi_build_status(r["CE_P_Chg"], r["CE_O_Chg"], True)
+                st_pe, bg_pe, col_pe, scr_pe = get_oi_build_status(r["PE_P_Chg"], r["PE_O_Chg"], False)
                 
                 net_score += (scr_ce * abs(r["CE_O_Chg"])) + (scr_pe * abs(r["PE_O_Chg"]))
                 
-                ce_rows.append(f"<tr><td>{r['Strike']}</td><td style='color:{'#00E676' if r['CE_P_Chg']>0 else '#FF5252'}'>{r['CE_P_Chg']:+.1f}</td><td style='color:{'#00E676' if r['CE_O_Chg']>0 else '#FF5252'}'>{r['CE_O_Chg']:+,.0f}</td><td><span class='tag-badge' style='background-color:{col_ce}; color:{'#00E676' if scr_ce>0 else ('#FF5252' if scr_ce<0 else '#8A93A6')}'>{st_ce}</span></td></tr>")
-                pe_rows.append(f"<tr><td>{r['Strike']}</td><td style='color:{'#00E676' if r['PE_P_Chg']>0 else '#FF5252'}'>{r['PE_P_Chg']:+.1f}</td><td style='color:{'#00E676' if r['PE_O_Chg']>0 else '#FF5252'}'>{r['PE_O_Chg']:+,.0f}</td><td><span class='tag-badge' style='background-color:{col_pe}; color:{'#00E676' if scr_pe>0 else ('#FF5252' if scr_pe<0 else '#8A93A6')}'>{st_pe}</span></td></tr>")
+                ce_rows.append(f"<tr><td>{r['Strike']:.0f}</td><td style='color:{'#00E676' if r['CE_P_Chg']>0 else '#FF5252'}'>{r['CE_P_Chg']:+.1f}</td><td style='color:{'#00E676' if r['CE_O_Chg']>0 else '#FF5252'}'>{r['CE_O_Chg']:+,.0f}</td><td><span class='tag-badge' style='background-color:{bg_ce}; color:{col_ce}'>{st_ce}</span></td></tr>")
+                pe_rows.append(f"<tr><td>{r['Strike']:.0f}</td><td style='color:{'#00E676' if r['PE_P_Chg']>0 else '#FF5252'}'>{r['PE_P_Chg']:+.1f}</td><td style='color:{'#00E676' if r['PE_O_Chg']>0 else '#FF5252'}'>{r['PE_O_Chg']:+,.0f}</td><td><span class='tag-badge' style='background-color:{bg_pe}; color:{col_pe}'>{st_pe}</span></td></tr>")
 
             sent_text = "🟢 Bullish Options Flow Dominating" if net_score > 0 else ("🔴 Bearish Options Flow Dominating" if net_score < 0 else "⚪ Neutral Options Flow")
             sent_col = "#00E676" if net_score > 0 else ("#FF5252" if net_score < 0 else "#8A93A6")
@@ -800,7 +799,7 @@ elif df_oc is not None and not df_oc.empty:
             st.markdown('</div>', unsafe_allow_html=True)
         with oi_col2:
             st.markdown('<div class="chart-container" style="padding-bottom:0px;"><div class="chart-title" style="margin-bottom:0px; border-bottom:none;">OI Change Tracker</div></div>', unsafe_allow_html=True)
-            oi_window = st.radio("Timeframe", ["5m", "10m", "15m", "30m", "1H", "Intraday"], horizontal=True, label_visibility="collapsed", key="oi_win")
+            oi_window = st.radio("Timeframe", ["5m", "10m", "15m", "30m", "1H", "Intraday"], horizontal=True, label_visibility="collapsed", key="oi_win_prof")
             
             ce_chg_col, pe_chg_col = "CE_OI_Chg", "PE_OI_Chg"
             if oi_window != "Intraday":
