@@ -174,19 +174,14 @@ def send_telegram_alert(message: str):
 def process_camarilla_alerts(df_camarilla, is_market_live, today_date_str):
     if not is_market_live: return
     if "telegram_cooldowns" not in st.session_state: st.session_state["telegram_cooldowns"] = {}
-    
     for _, row in df_camarilla.iterrows():
-        sym = row["Symbol"]
-        w = row["Weight"]
-        ltp = row["LTP"]
-        
+        sym, w, ltp = row["Symbol"], row["Weight"], row["LTP"]
         if row["Dist_S3_%"] <= 0.15:
             key = f"{sym}_S3"
             if st.session_state["telegram_cooldowns"].get(key) != today_date_str:
                 msg = f"🟢 *CAMARILLA S3 TESTED*\n\n*Stock:* `{sym}` (Weight: {w}%)\n*LTP:* ₹{ltp:,.2f} | *S3:* ₹{row['S3']:,.2f}\n*Distance:* `{row['Dist_S3_%']:.2f}%`\n\n⚡ *Nifty Support / Rebound Candidate*"
                 send_telegram_alert(msg)
                 st.session_state["telegram_cooldowns"][key] = today_date_str
-                
         elif row["Dist_R3_%"] <= 0.15:
             key = f"{sym}_R3"
             if st.session_state["telegram_cooldowns"].get(key) != today_date_str:
@@ -195,30 +190,24 @@ def process_camarilla_alerts(df_camarilla, is_market_live, today_date_str):
                 st.session_state["telegram_cooldowns"][key] = today_date_str
 
 # ---------------------------------------------------------
-# 3. GREEK ENGINE (Corrected for Dividends)
+# 3. GREEK ENGINE
 # ---------------------------------------------------------
 def calculate_bs_greeks(S, K, T, sigma, r=0.07, q=NIFTY_DIVIDEND_YIELD):
-    if T <= 1e-5 or sigma <= 1e-4 or S <= 0 or K <= 0: 
-        return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+    if T <= 1e-5 or sigma <= 1e-4 or S <= 0 or K <= 0: return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
     try:
         d1 = (math.log(S / K) + (r - q + 0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
         d2 = d1 - sigma * math.sqrt(T)
         pdf_d1 = (1.0 / math.sqrt(2 * math.pi)) * math.exp(-0.5 * d1 * d1)
         cdf_d1 = 0.5 * (1.0 + math.erf(d1 / math.sqrt(2.0)))
-        
         exp_qT = math.exp(-q * T)
         
         ce_delta = exp_qT * cdf_d1
         pe_delta = exp_qT * (cdf_d1 - 1.0)
-        
         gamma = exp_qT * pdf_d1 / (S * sigma * math.sqrt(T))
         vega = S * exp_qT * pdf_d1 * math.sqrt(T) / 100.0  
-        
         vanna = -exp_qT * pdf_d1 * d2 / sigma
-        
         ce_charm = q * exp_qT * cdf_d1 - exp_qT * pdf_d1 * (2 * (r - q) * T - d2 * sigma * math.sqrt(T)) / (2 * T * sigma * math.sqrt(T))
         pe_charm = ce_charm - q * exp_qT
-        
         speed = -exp_qT * pdf_d1 / (S**2 * sigma * math.sqrt(T)) * (1.0 + d1 / (sigma * math.sqrt(T)))
         vomma = vega * d1 * d2 / sigma
         
@@ -233,18 +222,13 @@ def calculate_bs_greeks(S, K, T, sigma, r=0.07, q=NIFTY_DIVIDEND_YIELD):
 def fetch_gex_option_chain_raw(expiry_date):
     url = "https://api.dhan.co/v2/optionchain"
     headers = {"client-id": CLIENT_ID, "access-token": ACCESS_TOKEN, "Content-Type": "application/json"}
-    
     start_time = time.time()
     try:
         res = requests.post(url, headers=headers, json={"UnderlyingScrip": 13, "UnderlyingSeg": "IDX_I", "Expiry": expiry_date}, timeout=8)
         GLOBAL_STATE["api_latency"] = round((time.time() - start_time) * 1000, 2)
-        
-        if res.status_code != 200:
-            return None, 0.0, f"HTTP Error {res.status_code}"
-            
+        if res.status_code != 200: return None, 0.0, f"HTTP Error {res.status_code}"
         data = res.json()
-        if data.get("status") != "success":
-            return None, 0.0, str(data.get("remarks") or data.get("message") or "API Returned Fail")
+        if data.get("status") != "success": return None, 0.0, str(data.get("remarks") or data.get("message") or "API Returned Fail")
 
         spot_price = float(data.get("data", {}).get("last_price", 0.0))
         oc_raw = data.get("data", {}).get("oc", {})
@@ -252,7 +236,6 @@ def fetch_gex_option_chain_raw(expiry_date):
 
         try: exp_date_obj = pd.to_datetime(expiry_date[:10], dayfirst=True).date()
         except: exp_date_obj = datetime.date.today() + datetime.timedelta(days=1)
-            
         T_years = max((exp_date_obj - datetime.date.today()).days, 1) / 365.0
         records = []
         
@@ -263,7 +246,6 @@ def fetch_gex_option_chain_raw(expiry_date):
             ce_oi, pe_oi = float(ce.get("oi", 0)), float(pe.get("oi", 0))
             ce_prev = float(ce.get("previous_oi") if ce.get("previous_oi") is not None else ce_oi)
             pe_prev = float(pe.get("previous_oi") if pe.get("previous_oi") is not None else pe_oi)
-            
             ce_oichg = ce_oi - ce_prev
             pe_oichg = pe_oi - pe_prev
 
@@ -284,13 +266,12 @@ def fetch_gex_option_chain_raw(expiry_date):
             records.append({
                 "Strike": strike, "CE_LTP": ce_ltp, "PE_LTP": pe_ltp, "CE_OI": ce_oi, "PE_OI": pe_oi, 
                 "CE_OI_Chg": ce_oichg, "PE_OI_Chg": pe_oichg, "CE_Vol": ce_vol, "PE_Vol": pe_vol,
-                "CE_Delta": ce_delta, "PE_Delta": pe_delta, 
-                "Net_Delta_OI": (ce_oi * ce_delta) + (pe_oi * pe_delta),
+                "CE_Delta": ce_delta, "PE_Delta": pe_delta, "Net_Delta_OI": (ce_oi * ce_delta) + (pe_oi * pe_delta),
                 "Net_DEX": (ce_oi * ce_delta + pe_oi * pe_delta) * NIFTY_LOT_SIZE * spot_price / 1e5,
                 "ABS_DEX": (abs(ce_oi * ce_delta) + abs(pe_oi * pe_delta)) * NIFTY_LOT_SIZE * spot_price / 1e5,
                 "Call_GEX": ce_oi * NIFTY_LOT_SIZE * ce_gamma * (spot_price**2) * 0.01 / 1e5,
                 "Put_GEX": -pe_oi * NIFTY_LOT_SIZE * pe_gamma * (spot_price**2) * 0.01 / 1e5,
-                "CE_VEX": ce_vex, "PE_VEX": pe_vex, "Net_VEX": ce_vex - pe_vex,
+                "CE_VEX": ce_vex, "PE_VEX": pe_vex, "Net_VEX": ce_vex - pe_vex, 
                 "CE_CHEX": ce_chex, "PE_CHEX": pe_chex, "Net_CHEX": ce_chex - pe_chex,
                 "CE_SPEX": ce_spex, "PE_SPEX": pe_spex, "Net_SPEX": ce_spex - pe_spex,
                 "CE_Vega": ce_vega * ce_oi * NIFTY_LOT_SIZE, "PE_Vega": pe_vega * pe_oi * NIFTY_LOT_SIZE,
@@ -302,7 +283,6 @@ def fetch_gex_option_chain_raw(expiry_date):
         df["Net_GEX"] = df["Call_GEX"] + df["Put_GEX"]
         df["ABS_GEX"] = df["Call_GEX"] + df["Put_GEX"].abs()
         return df.sort_values("Strike").reset_index(drop=True), spot_price, None
-        
     except requests.exceptions.RequestException as e:
         log_error(f"API Request Failed: {e}")
         return None, 0.0, "Connection Error"
@@ -324,16 +304,12 @@ def fetch_multi_expiry_vol_structure(spot_price, valid_exp_list):
             temp_spot_atm = int(round(exp_spot / 50) * 50)
             atm_row = df_exp[df_exp["Strike"] == temp_spot_atm]
             mean_iv = (atm_row["CE_IV"].values[0] + atm_row["PE_IV"].values[0]) / 2.0 if not atm_row.empty else df_exp["CE_IV"].mean()
-            
             try: exp_date_obj = pd.to_datetime(exp[:10], dayfirst=True).date()
             except: continue
-            
             days = max((exp_date_obj - datetime.date.today()).days, 1)
-
             vol_data.append({"Expiry": exp_date_obj.strftime("%d %b"), "Days": days, "Tenor_Years": days / 365.0, "Mean_IV": max(mean_iv, 0.01)})
             for _, r in df_exp.iterrows():
-                if temp_spot_atm - 600 <= r["Strike"] <= temp_spot_atm + 600: 
-                    surface_data.append({"Expiry": exp, "Days": days, "Strike": r["Strike"], "IV": (r["CE_IV"] + r["PE_IV"]) / 2.0})
+                if temp_spot_atm - 600 <= r["Strike"] <= temp_spot_atm + 600: surface_data.append({"Expiry": exp, "Days": days, "Strike": r["Strike"], "IV": (r["CE_IV"] + r["PE_IV"]) / 2.0})
 
     df_vol, df_surf = pd.DataFrame(vol_data), pd.DataFrame(surface_data)
     if not df_vol.empty and len(df_vol) > 1:
@@ -383,12 +359,8 @@ def get_nifty50_camarilla():
             if len(df_t) >= 2:
                 last_date = df_t.index[-1].date()
                 prev_idx = -2 if last_date == today else -1
-                
-                prev_h = df_t.iloc[prev_idx]['High']
-                prev_l = df_t.iloc[prev_idx]['Low']
-                prev_c = df_t.iloc[prev_idx]['Close']
+                prev_h, prev_l, prev_c = df_t.iloc[prev_idx]['High'], df_t.iloc[prev_idx]['Low'], df_t.iloc[prev_idx]['Close']
                 ltp = df_t.iloc[-1]['Close']
-                
                 r_hl = prev_h - prev_l
                 r3 = prev_c + (r_hl * 1.1 / 4)
                 s3 = prev_c - (r_hl * 1.1 / 4)
@@ -471,18 +443,25 @@ start_background_daemon()
 
 df_oc, spot_price, error_remark = fetch_gex_option_chain(selected_expiry)
 
+# Restore Dataframes Initialization explicitly
 for key, cols in [
     ("absorption_history", ["Date", "Timestamp", "Spot", "Fut_LTP", "CE_OI", "PE_OI", "CE_Vol", "PE_Vol"]),
     ("oi_snapshots", ["Date", "Timestamp", "Strike", "CE_OI", "PE_OI", "CE_LTP", "PE_LTP"]),
     ("iv_spread_history", ["Date", "Time", "Strike", "CE_IV", "PE_IV", "IV_Spread", "Spot"]),
     ("pcr_history", ["Date", "Timestamp_dt", "Time", "PCR", "Vol_PCR", "Delta_PCR_5m", "Delta_PCR_15m", "Total_CE_OI", "Total_PE_OI"]),
-    ("synth_history", ["Date", "Time", "Spot", "Strike_M50", "Strike_ATM", "Strike_P50", "Synth_M50", "Synth_ATM", "Synth_P50", "PCP_Dev_Mean"])
+    ("gex_history", ["Date", "Timestamp_dt", "Time", "Total_Net_GEX", "Z_GEX", "Flip_Strike", "Spot", "Max_Pain"]),
+    ("synth_history", ["Date", "Time", "Spot", "Strike_M50", "Strike_ATM", "Strike_P50", "Synth_M50", "Synth_ATM", "Synth_P50", "PCP_Dev_Mean"]),
+    ("delta_oi_history", ["Date", "Timestamp_dt", "Time", "Total_Net_Delta_OI", "Delta_OI_ROC_1m", "Total_Net_DEX", "DEX_Vel_5m"]),
+    ("straddle_history", ["Date", "Time", "Elapsed_Mins", "Actual_Straddle", "Expected_Straddle", "Regime", "Straddle_VWAP"])
 ]:
     if key not in st.session_state: st.session_state[key] = check_and_reset(key, cols, today_date_str, now_time_str)
 
+if "straddle_anchor_price" not in st.session_state: st.session_state["straddle_anchor_price"] = None
+
 if st.sidebar.button("🗑️ Reset Session Cache"):
-    for key in ["absorption_history", "oi_snapshots", "iv_spread_history", "pcr_history", "synth_history"]:
+    for key in ["absorption_history", "oi_snapshots", "iv_spread_history", "pcr_history", "gex_history", "synth_history", "delta_oi_history", "straddle_history"]:
         st.session_state[key] = pd.DataFrame(columns=st.session_state[key].columns)
+    st.session_state["straddle_anchor_price"] = None
     st.cache_data.clear(); st.rerun()
 
 # ---------------------------------------------------------
@@ -535,12 +514,21 @@ for i in range(1, len(df_sorted)):
         else: gamma_flip_strike = (x1 + x2) / 2.0
         break
 
+# Compute Max Pain for Tab 4 & Memory
+max_pain_strike = atm_strike
+pain_records = [{"Strike": k, "Writer_Loss": (df_oc["CE_OI"] * (k - df_oc["Strike"]).clip(lower=0)).sum() + (df_oc["PE_OI"] * (df_oc["Strike"] - k).clip(lower=0)).sum()} for k in df_oc["Strike"] if atm_strike - 1500 <= k <= atm_strike + 1500]
+df_pain = pd.DataFrame()
+if pain_records:
+    df_pain = pd.DataFrame(pain_records)
+    max_pain_strike = df_pain.loc[df_pain["Writer_Loss"].idxmin()]["Strike"]
+
 df_filtered = df_oc[(df_oc["Strike"] >= atm_strike - 550) & (df_oc["Strike"] <= atm_strike + 550)].copy()
 
 total_ce_oi_sum = df_oc["CE_OI"].sum()
 total_pe_oi_sum = df_oc["PE_OI"].sum()
 now_ts = int(time.time())
 
+# Ensure all Memory states update safely
 if is_market_live:
     abs_df = st.session_state["absorption_history"]
     if abs_df.empty or (now_ts - abs_df["Timestamp"].max() >= 60):
@@ -569,6 +557,32 @@ if is_market_live:
         st.session_state["pcr_history"] = pd.concat([pcr_df, pd.DataFrame([{"Date": today_date_str, "Timestamp_dt": now_ist, "Time": now_time_str, "PCR": current_pcr, "Vol_PCR": vol_pcr, "Delta_PCR_5m": 0.0, "Delta_PCR_15m": dp_15m, "Total_CE_OI": total_ce_oi_sum, "Total_PE_OI": total_pe_oi_sum}])], ignore_index=True)
         save_persisted_df(st.session_state["pcr_history"], "pcr_history")
 
+    gex_df = st.session_state["gex_history"]
+    if gex_df.empty or str(gex_df.iloc[-1]["Time"]) != now_time_str:
+        z_gex = (df_oc["Net_GEX"].sum() - gex_df["Total_Net_GEX"].tail(20).mean()) / max(gex_df["Total_Net_GEX"].tail(20).std(), 1e-6) if len(gex_df) >= 2 else 0.0
+        st.session_state["gex_history"] = pd.concat([gex_df, pd.DataFrame([{"Date": today_date_str, "Timestamp_dt": now_ist, "Time": now_time_str, "Total_Net_GEX": df_oc["Net_GEX"].sum(), "Z_GEX": z_gex, "Flip_Strike": gamma_flip_strike, "Spot": spot_price, "Max_Pain": max_pain_strike}])], ignore_index=True)
+        save_persisted_df(st.session_state["gex_history"], "gex_history")
+
+    doi_df = st.session_state["delta_oi_history"]
+    if doi_df.empty or str(doi_df.iloc[-1]["Time"]) != now_time_str:
+        d_roc_1m = df_oc["Net_Delta_OI"].sum() - doi_df[doi_df["Timestamp_dt"] <= now_ist - datetime.timedelta(minutes=1)].iloc[-1]["Total_Net_Delta_OI"] if not doi_df[doi_df["Timestamp_dt"] <= now_ist - datetime.timedelta(minutes=1)].empty else 0.0
+        dex_vel = (df_oc["Net_DEX"].sum()) - doi_df[doi_df["Timestamp_dt"] <= now_ist - datetime.timedelta(minutes=5)].iloc[-1]["Total_Net_DEX"] if not doi_df[doi_df["Timestamp_dt"] <= now_ist - datetime.timedelta(minutes=5)].empty else 0.0
+        st.session_state["delta_oi_history"] = pd.concat([doi_df, pd.DataFrame([{"Date": today_date_str, "Timestamp_dt": now_ist, "Time": now_time_str, "Total_Net_Delta_OI": df_oc["Net_Delta_OI"].sum(), "Delta_OI_ROC_1m": d_roc_1m, "Total_Net_DEX": df_oc["Net_DEX"].sum(), "DEX_Vel_5m": dex_vel}])], ignore_index=True)
+        save_persisted_df(st.session_state["delta_oi_history"], "delta_oi_history")
+
+    strad_df = st.session_state["straddle_history"]
+    if strad_df.empty or str(strad_df.iloc[-1]["Time"]) != now_time_str:
+        r_atm_cur = df_oc[df_oc["Strike"] == atm_strike]
+        c_strad = (r_atm_cur["CE_LTP"].values[0] if not r_atm_cur.empty else 0.0) + (r_atm_cur["PE_LTP"].values[0] if not r_atm_cur.empty else 0.0)
+        e_mins = max(0, min((now_ist - m_open).total_seconds() / 60.0, 375)) 
+        if e_mins >= 5.0 and st.session_state["straddle_anchor_price"] is None: st.session_state["straddle_anchor_price"] = c_strad
+        e_strad = (st.session_state["straddle_anchor_price"] or c_strad) * (1 - (0.15 * math.sqrt(e_mins / 375)))
+        prev_vwap = strad_df.iloc[-1]["Straddle_VWAP"] if not strad_df.empty and "Straddle_VWAP" in strad_df.columns else c_strad
+        strad_vwap = ((prev_vwap * max(1, len(strad_df))) + c_strad) / (len(strad_df) + 1)
+        regime = "VOL COIL 🟢" if c_strad > e_strad + 2.0 else ("IV CRUSH 🔴" if c_strad < e_strad - 2.0 else "NORMAL DECAY")
+        st.session_state["straddle_history"] = pd.concat([strad_df, pd.DataFrame([{"Date": today_date_str, "Time": now_time_str, "Elapsed_Mins": e_mins, "Actual_Straddle": c_strad, "Expected_Straddle": e_strad, "Regime": regime, "Straddle_VWAP": strad_vwap}])], ignore_index=True)
+        save_persisted_df(st.session_state["straddle_history"], "straddle_history")
+
     synth_df = st.session_state["synth_history"]
     if synth_df.empty or str(synth_df.iloc[-1]["Time"]) != now_time_str:
         r_m50, r_atm, r_p50 = df_oc[df_oc["Strike"] == strike_m50], df_oc[df_oc["Strike"] == atm_strike], df_oc[df_oc["Strike"] == strike_p50]
@@ -578,10 +592,14 @@ if is_market_live:
         st.session_state["synth_history"] = pd.concat([synth_df, pd.DataFrame([{"Date": today_date_str, "Time": now_time_str, "Spot": spot_price, "Strike_M50": strike_m50, "Strike_ATM": atm_strike, "Strike_P50": strike_p50, "Synth_M50": s_m50, "Synth_ATM": s_atm, "Synth_P50": s_p50, "PCP_Dev_Mean": ((s_m50 - spot_price) + (s_atm - spot_price) + (s_p50 - spot_price)) / 3.0}])], ignore_index=True)
         save_persisted_df(st.session_state["synth_history"], "synth_history")
 
+# Load Memory explicitly for UI graphs
 abs_df = st.session_state["absorption_history"]
 oi_snap = st.session_state["oi_snapshots"]
 iv_hist = st.session_state["iv_spread_history"]
 pcr_df = st.session_state["pcr_history"]
+gex_df = st.session_state["gex_history"]
+doi_df = st.session_state["delta_oi_history"]
+strad_df = st.session_state["straddle_history"]
 synth_df = st.session_state["synth_history"]
 
 # PREMIUM HERO BANNER
@@ -599,7 +617,6 @@ today_snaps = oi_snap[oi_snap["Date"] == today_date_str]
 if not today_snaps.empty:
     first_ts = today_snaps["Timestamp"].min()
     first_snap = today_snaps[today_snaps["Timestamp"] == first_ts]
-    # Map the very first snapshot of the day to compute precise absolute change
     df_filtered["CE_OI_Chg_Calc"] = df_filtered["CE_OI"] - df_filtered["Strike"].map(first_snap.set_index("Strike")["CE_OI"]).fillna(df_filtered["CE_OI"])
     df_filtered["PE_OI_Chg_Calc"] = df_filtered["PE_OI"] - df_filtered["Strike"].map(first_snap.set_index("Strike")["PE_OI"]).fillna(df_filtered["PE_OI"])
     tot_ce_oichg, tot_pe_oichg = df_filtered["CE_OI_Chg_Calc"].sum(), df_filtered["PE_OI_Chg_Calc"].sum()
@@ -650,7 +667,6 @@ with tab1: # PRINCE ANALYSIS
     v1, v2 = st.columns(2)
     with v1:
         st.markdown('<div class="chart-container"><div class="chart-title">Forward Vol Term Structure (Active + 3 Expiries)</div>', unsafe_allow_html=True)
-        # Guarantees the selected expiry is parsed as first element
         exp_list = [selected_expiry] + [x for x in valid_expiries if x != selected_expiry][:3]
         df_vol_struct, df_surface = fetch_multi_expiry_vol_structure(spot_price, exp_list)
         
@@ -917,6 +933,29 @@ with tab3: # INTRADAY & ADVANCED ANALYTICS (MERGED)
             fig_synth.add_trace(go.Scatter(x=synth_df["Time"], y=synth_df["Synth_ATM"], mode="lines", name="ATM Synth", line=dict(color="#29B6F6", width=1.5, dash="dot")))
             fig_synth.add_trace(go.Scatter(x=synth_df["Time"], y=synth_df["Synth_P50"], mode="lines", name="OTM Synth", line=dict(color="#FF5252", width=1.5, dash="dot")))
         st.plotly_chart(apply_dark_layout(fig_synth), use_container_width=True, config=PLOT_CONFIG)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    a3, a4 = st.columns(2)
+    with a3:
+        st.markdown('<div class="chart-container"><div class="chart-title">Fyers ATM Straddle LTP vs Price vs Straddle VWAP</div>', unsafe_allow_html=True)
+        fig_fyers_strad = make_subplots(specs=[[{"secondary_y": True}]])
+        if not strad_df.empty:
+            fig_fyers_strad.add_trace(go.Scatter(x=strad_df["Time"], y=strad_df["Actual_Straddle"], mode="lines", name="ATM Straddle LTP", line=dict(color="#FF5252", width=2)), secondary_y=False)
+            if "Straddle_VWAP" in strad_df.columns:
+                fig_fyers_strad.add_trace(go.Scatter(x=strad_df["Time"], y=strad_df["Straddle_VWAP"], mode="lines", name="Straddle VWAP", line=dict(color="#00E676", width=1.5, dash="dot")), secondary_y=False)
+            if not synth_df.empty:
+                fig_fyers_strad.add_trace(go.Scatter(x=synth_df["Time"], y=synth_df["Spot"], mode="lines", name="Nifty Price", line=dict(color="#29B6F6", width=1.5, dash="dash")), secondary_y=True)
+        fig_fyers_strad.update_yaxes(title_text="Straddle Premium (₹)", secondary_y=False, gridcolor="#2A2E39")
+        fig_fyers_strad.update_yaxes(title_text="Nifty Price", secondary_y=True, showgrid=False)
+        st.plotly_chart(apply_dark_layout(fig_fyers_strad), use_container_width=True, config=PLOT_CONFIG)
+        st.markdown('</div>', unsafe_allow_html=True)
+    with a4:
+        st.markdown('<div class="chart-container"><div class="chart-title">Gamma Flip Migration (ΔFlip)</div>', unsafe_allow_html=True)
+        fig_flip = go.Figure()
+        if not gex_df.empty:
+            fig_flip.add_trace(go.Scatter(x=gex_df["Time"], y=gex_df["Spot"], mode="lines", name="Spot", line=dict(color="#FFD700", width=2)))
+            fig_flip.add_trace(go.Scatter(x=gex_df["Time"], y=gex_df["Flip_Strike"], mode="lines", name="Flip Level", line=dict(color="#29B6F6", width=2, dash="dash")))
+        st.plotly_chart(apply_dark_layout(fig_flip), use_container_width=True, config=PLOT_CONFIG)
         st.markdown('</div>', unsafe_allow_html=True)
 
 with tab4: # OPENBULL & FYERS SKEW
