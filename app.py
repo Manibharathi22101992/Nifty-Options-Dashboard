@@ -123,6 +123,20 @@ NIFTY_LOT_SIZE = 65
 NIFTY_DIVIDEND_YIELD = 0.012  
 PLOT_CONFIG = {'displayModeBar': True, 'scrollZoom': False}
 
+# RESTORED NIFTY 50 WEIGHTS DICTIONARY
+NIFTY_50_WEIGHTS = {
+    "HDFCBANK.NS": 11.6, "RELIANCE.NS": 9.8, "ICICIBANK.NS": 7.9, "INFY.NS": 5.8, "ITC.NS": 4.5,
+    "TCS.NS": 4.1, "LT.NS": 3.4, "AXISBANK.NS": 3.2, "KOTAKBANK.NS": 2.8, "SBIN.NS": 2.7,
+    "BHARTIARTL.NS": 2.6, "HINDUNILVR.NS": 2.4, "BAJFINANCE.NS": 2.1, "MARUTI.NS": 1.8, "ASIANPAINT.NS": 1.7,
+    "M&M.NS": 1.6, "SUNPHARMA.NS": 1.5, "TITAN.NS": 1.5, "HCLTECH.NS": 1.4, "TATASTEEL.NS": 1.3,
+    "NTPC.NS": 1.3, "ULTRACEMCO.NS": 1.1, "TATAMOTORS.NS": 1.1, "INDUSINDBK.NS": 1.1, "POWERGRID.NS": 1.0,
+    "NESTLEIND.NS": 1.0, "BAJAJFINSV.NS": 1.0, "ONGC.NS": 0.9, "GRASIM.NS": 0.9, "JSWSTEEL.NS": 0.8,
+    "TECHM.NS": 0.8, "HINDALCO.NS": 0.8, "ADANIPORTS.NS": 0.8, "WIPRO.NS": 0.7, "COALINDIA.NS": 0.7,
+    "DRREDDY.NS": 0.7, "CIPLA.NS": 0.6, "EICHERMOT.NS": 0.6, "APOLLOHOSP.NS": 0.6, "TATACHEM.NS": 0.5,
+    "DIVISLAB.NS": 0.5, "BRITANNIA.NS": 0.5, "BAJAJ-AUTO.NS": 0.5, "HEROMOTOCO.NS": 0.4, "SBILIFE.NS": 0.4,
+    "LTIM.NS": 0.4, "HDFCLIFE.NS": 0.4, "TATACONSUM.NS": 0.4, "UPL.NS": 0.3, "SHREECEM.NS": 0.3
+}
+
 def fmt_num(val):
     if pd.isna(val): return "0"
     abs_val = abs(val)
@@ -174,14 +188,20 @@ def send_telegram_alert(message: str):
 def process_camarilla_alerts(df_camarilla, is_market_live, today_date_str):
     if not is_market_live: return
     if "telegram_cooldowns" not in st.session_state: st.session_state["telegram_cooldowns"] = {}
+    
     for _, row in df_camarilla.iterrows():
-        sym, w, ltp = row["Symbol"], row["Weight"], row["LTP"]
+        sym = row["Symbol"]
+        w = row["Weight"]
+        ltp = row["LTP"]
+        
+        # 1 Alert per day per level per stock
         if row["Dist_S3_%"] <= 0.15:
             key = f"{sym}_S3"
             if st.session_state["telegram_cooldowns"].get(key) != today_date_str:
                 msg = f"🟢 *CAMARILLA S3 TESTED*\n\n*Stock:* `{sym}` (Weight: {w}%)\n*LTP:* ₹{ltp:,.2f} | *S3:* ₹{row['S3']:,.2f}\n*Distance:* `{row['Dist_S3_%']:.2f}%`\n\n⚡ *Nifty Support / Rebound Candidate*"
                 send_telegram_alert(msg)
                 st.session_state["telegram_cooldowns"][key] = today_date_str
+                
         elif row["Dist_R3_%"] <= 0.15:
             key = f"{sym}_R3"
             if st.session_state["telegram_cooldowns"].get(key) != today_date_str:
@@ -443,7 +463,6 @@ start_background_daemon()
 
 df_oc, spot_price, error_remark = fetch_gex_option_chain(selected_expiry)
 
-# Restore Dataframes Initialization explicitly
 for key, cols in [
     ("absorption_history", ["Date", "Timestamp", "Spot", "Fut_LTP", "CE_OI", "PE_OI", "CE_Vol", "PE_Vol"]),
     ("oi_snapshots", ["Date", "Timestamp", "Strike", "CE_OI", "PE_OI", "CE_LTP", "PE_LTP"]),
@@ -514,13 +533,13 @@ for i in range(1, len(df_sorted)):
         else: gamma_flip_strike = (x1 + x2) / 2.0
         break
 
-# Compute Max Pain for Tab 4 & Memory
+# Compute Max Pain for Memory
 max_pain_strike = atm_strike
 pain_records = [{"Strike": k, "Writer_Loss": (df_oc["CE_OI"] * (k - df_oc["Strike"]).clip(lower=0)).sum() + (df_oc["PE_OI"] * (df_oc["Strike"] - k).clip(lower=0)).sum()} for k in df_oc["Strike"] if atm_strike - 1500 <= k <= atm_strike + 1500]
 df_pain = pd.DataFrame()
 if pain_records:
-    df_pain = pd.DataFrame(pain_records)
-    max_pain_strike = df_pain.loc[df_pain["Writer_Loss"].idxmin()]["Strike"]
+    df_pain_temp = pd.DataFrame(pain_records)
+    max_pain_strike = df_pain_temp.loc[df_pain_temp["Writer_Loss"].idxmin()]["Strike"]
 
 df_filtered = df_oc[(df_oc["Strike"] >= atm_strike - 550) & (df_oc["Strike"] <= atm_strike + 550)].copy()
 
@@ -528,7 +547,7 @@ total_ce_oi_sum = df_oc["CE_OI"].sum()
 total_pe_oi_sum = df_oc["PE_OI"].sum()
 now_ts = int(time.time())
 
-# Ensure all Memory states update safely
+# Update Memory Only When Valid
 if is_market_live:
     abs_df = st.session_state["absorption_history"]
     if abs_df.empty or (now_ts - abs_df["Timestamp"].max() >= 60):
