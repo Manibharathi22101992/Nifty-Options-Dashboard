@@ -505,7 +505,7 @@ else:
             gamma_flip_strike = int((df_sorted.iloc[i-1]["Strike"] + df_sorted.iloc[i]["Strike"]) / 2.0)
             break
 
-    # Calculate max_pain_strike (Restored Calculation to fix NameError)
+    # Re-calculate max_pain_strike (Restored to fix NameError)
     max_pain_strike = atm_strike
     pain_records = [{"Strike": k, "Writer_Loss": (df_oc["CE_OI"] * (k - df_oc["Strike"]).clip(lower=0)).sum() + (df_oc["PE_OI"] * (df_oc["Strike"] - k).clip(lower=0)).sum()} for k in df_oc["Strike"] if atm_strike - 1500 <= k <= atm_strike + 1500]
     if pain_records:
@@ -863,6 +863,7 @@ else:
         else: st.info("Loading Term Structure Data... Bypassing Dhan Rate Limits (Takes ~10 seconds)")
         st.markdown('</div>', unsafe_allow_html=True)
 
+
     with tab3: # GREEK EXPOSURES
         call_wall_dex = df_filtered.loc[df_filtered['Net_DEX'].idxmax()]['Strike'] if not df_filtered.empty else atm_strike
         put_wall_dex = df_filtered.loc[df_filtered['Net_DEX'].idxmin()]['Strike'] if not df_filtered.empty else atm_strike
@@ -897,9 +898,8 @@ else:
             y_max_gex = max(df_filtered["ABS_GEX"].max() if not df_filtered.empty else 1, df_filtered["Net_GEX"].max() if not df_filtered.empty else 1) * 1.1
             fig_gex.add_vline(x=spot_price, line_dash="solid", line_color="#FFD700"); fig_gex.add_annotation(x=spot_price, y=y_max_gex*0.95, text=f"Spot: {spot_price:.1f}", showarrow=False, font=dict(color="#FFD700", size=9))
             fig_gex.add_vline(x=gamma_flip_strike, line_dash="dash", line_color="#29B6F6"); fig_gex.add_annotation(x=gamma_flip_strike, y=y_max_gex*0.85, text=f"Flip: {gamma_flip_strike}", showarrow=False, font=dict(color="#29B6F6", size=9))
-            fig_gex.add_vline(x=max_pain_strike, line_dash="dash", line_color="#FFD700"); fig_gex.add_annotation(x=max_pain_strike, y=y_max_gex*0.75, text=f"Max Pain: {max_pain_strike}", showarrow=False, font=dict(color="#FFD700", size=9))
             fig_gex.add_vline(x=call_wall_gex, line_dash="dash", line_color="#00E676"); fig_gex.add_annotation(x=call_wall_gex, y=y_max_gex*0.65, text=f"Call Wall: {call_wall_gex}", showarrow=False, font=dict(color="#00E676", size=9))
-            fig_gex.add_vline(x=rput_wall_gex, line_dash="dash", line_color="#FF5252"); fig_gex.add_annotation(x=rput_wall_gex, y=y_max_gex*0.55, text=f"Put Wall: {rput_wall_gex}", showarrow=False, font=dict(color="#FF5252", size=9))
+            fig_gex.add_vline(x=put_wall_gex, line_dash="dash", line_color="#FF5252"); fig_gex.add_annotation(x=put_wall_gex, y=y_max_gex*0.55, text=f"Put Wall: {put_wall_gex}", showarrow=False, font=dict(color="#FF5252", size=9))
             st.plotly_chart(apply_dark_layout(fig_gex, 350, True, df_filtered, atm_strike), use_container_width=True, config=PLOT_CONFIG)
             st.markdown('</div>', unsafe_allow_html=True)
 
@@ -953,15 +953,6 @@ else:
 
         a3, a4 = st.columns(2)
         with a3:
-            st.markdown('<div class="chart-container"><div class="chart-title">Intraday Max Pain Migration (ΔMax Pain)</div>', unsafe_allow_html=True)
-            fig_pain_mig = go.Figure()
-            if not gex_df.empty:
-                fig_pain_mig.add_trace(go.Scatter(x=gex_df["Time"], y=gex_df["Spot"], mode="lines", name="Spot", line=dict(color="#FFD700", width=2)))
-                if "Max_Pain" in gex_df.columns:
-                    fig_pain_mig.add_trace(go.Scatter(x=gex_df["Time"], y=gex_df["Max_Pain"], mode="lines", name="Max Pain Level", line=dict(color="#FFD700", width=2, dash="dash")))
-            st.plotly_chart(apply_dark_layout(fig_pain_mig), use_container_width=True, config=PLOT_CONFIG)
-            st.markdown('</div>', unsafe_allow_html=True)
-        with a4:
             st.markdown('<div class="chart-container"><div class="chart-title">Put-Call Parity Discrepancy Index (PCP_Dev)</div>', unsafe_allow_html=True)
             fig_pcp = go.Figure()
             if not synth_df.empty:
@@ -970,16 +961,16 @@ else:
             fig_pcp.add_hline(y=-3.0, line_dash="dash", line_color="#FF5252", annotation_text="-3.0 Put Squeeze")
             st.plotly_chart(apply_dark_layout(fig_pcp), use_container_width=True, config=PLOT_CONFIG)
             st.markdown('</div>', unsafe_allow_html=True)
-
-        st.markdown('<div class="chart-container"><div class="chart-title">Multi-Strike Synthetic Parity Engine</div>', unsafe_allow_html=True)
-        fig_synth = go.Figure()
-        if not synth_df.empty:
-            fig_synth.add_trace(go.Scatter(x=synth_df["Time"], y=synth_df["Spot"], mode="lines", name="Spot", line=dict(color="#FFD700", width=2)))
-            fig_synth.add_trace(go.Scatter(x=synth_df["Time"], y=synth_df["Synth_M50"], mode="lines", name="ITM Synth", line=dict(color="#00E676", width=1.5, dash="dot")))
-            fig_synth.add_trace(go.Scatter(x=synth_df["Time"], y=synth_df["Synth_ATM"], mode="lines", name="ATM Synth", line=dict(color="#29B6F6", width=1.5, dash="dot")))
-            fig_synth.add_trace(go.Scatter(x=synth_df["Time"], y=synth_df["Synth_P50"], mode="lines", name="OTM Synth", line=dict(color="#FF5252", width=1.5, dash="dot")))
-        st.plotly_chart(apply_dark_layout(fig_synth), use_container_width=True, config=PLOT_CONFIG)
-        st.markdown('</div>', unsafe_allow_html=True)
+        with a4:
+            st.markdown('<div class="chart-container"><div class="chart-title">Multi-Strike Synthetic Parity Engine</div>', unsafe_allow_html=True)
+            fig_synth = go.Figure()
+            if not synth_df.empty:
+                fig_synth.add_trace(go.Scatter(x=synth_df["Time"], y=synth_df["Spot"], mode="lines", name="Spot", line=dict(color="#FFD700", width=2)))
+                fig_synth.add_trace(go.Scatter(x=synth_df["Time"], y=synth_df["Synth_M50"], mode="lines", name="ITM Synth", line=dict(color="#00E676", width=1.5, dash="dot")))
+                fig_synth.add_trace(go.Scatter(x=synth_df["Time"], y=synth_df["Synth_ATM"], mode="lines", name="ATM Synth", line=dict(color="#29B6F6", width=1.5, dash="dot")))
+                fig_synth.add_trace(go.Scatter(x=synth_df["Time"], y=synth_df["Synth_P50"], mode="lines", name="OTM Synth", line=dict(color="#FF5252", width=1.5, dash="dot")))
+            st.plotly_chart(apply_dark_layout(fig_synth), use_container_width=True, config=PLOT_CONFIG)
+            st.markdown('</div>', unsafe_allow_html=True)
 
     with tab5: # OPENBULL & FYERS SKEW
         f1, f2 = st.columns(2)
@@ -990,8 +981,6 @@ else:
                 fig_macro.add_trace(go.Scatter(x=pcr_df["Time"], y=pcr_df["PCR"], mode="lines", name="PCR", line=dict(color="#AB47BC", width=2)), secondary_y=False)
                 if not gex_df.empty:
                     fig_macro.add_trace(go.Scatter(x=gex_df["Time"], y=gex_df["Spot"], mode="lines", name="Nifty Price", line=dict(color="#FF5252", width=2)), secondary_y=True)
-                    if "Max_Pain" in gex_df.columns:
-                        fig_macro.add_trace(go.Scatter(x=gex_df["Time"], y=gex_df["Max_Pain"], mode="lines", name="Max Pain", line=dict(color="#00E676", width=2)), secondary_y=True)
             fig_macro.update_yaxes(title_text="PCR", secondary_y=False, gridcolor="#2A2E39")
             fig_macro.update_yaxes(title_text="Nifty Price / Max Pain", secondary_y=True, showgrid=False)
             st.plotly_chart(apply_dark_layout(fig_macro), use_container_width=True, config=PLOT_CONFIG)
