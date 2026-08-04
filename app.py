@@ -123,6 +123,7 @@ NIFTY_LOT_SIZE = 65
 NIFTY_DIVIDEND_YIELD = 0.012  
 PLOT_CONFIG = {'displayModeBar': True, 'scrollZoom': False}
 
+# RESTORED NIFTY 50 WEIGHTS DICTIONARY
 NIFTY_50_WEIGHTS = {
     "HDFCBANK.NS": 11.6, "RELIANCE.NS": 9.8, "ICICIBANK.NS": 7.9, "INFY.NS": 5.8, "ITC.NS": 4.5,
     "TCS.NS": 4.1, "LT.NS": 3.4, "AXISBANK.NS": 3.2, "KOTAKBANK.NS": 2.8, "SBIN.NS": 2.7,
@@ -145,10 +146,12 @@ def fmt_num(val):
     elif abs_val >= 1e3: return f"{sign}{abs_val/1e3:.1f}k"
     return f"{sign}{abs_val:.0f}"
 
-# Fixed Plotly Layout Engine - Let Plotly Auto-Scale X-Axis to Prevent Squishing
-def apply_dark_layout(fig, height=250, *args, **kwargs):
+def apply_dark_layout(fig, height=250, is_strike_axis=False, df_filtered=None, atm_strike=None):
     fig.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", margin=dict(l=5, r=5, t=10, b=5), height=height, legend=dict(orientation="h", y=1.1, x=0, font=dict(size=10)))
-    fig.update_xaxes(gridcolor="#2A2E39", zerolinecolor="#2A2E39", tickfont=dict(size=10))
+    if is_strike_axis and df_filtered is not None and not df_filtered.empty and atm_strike is not None:
+        fig.update_xaxes(tickmode='array', tickvals=df_filtered["Strike"], ticktext=df_filtered["Strike"].astype(str).tolist(), tickangle=-45, gridcolor="#2A2E39", zerolinecolor="#2A2E39", tickfont=dict(size=10, color="#D1D4DC"))
+    else:
+        fig.update_xaxes(gridcolor="#2A2E39", zerolinecolor="#2A2E39", tickfont=dict(size=10))
     fig.update_yaxes(gridcolor="#2A2E39", zerolinecolor="#2A2E39", tickfont=dict(size=10))
     return fig
 
@@ -191,6 +194,7 @@ def process_camarilla_alerts(df_camarilla, is_market_live, today_date_str):
         w = row["Weight"]
         ltp = row["LTP"]
         
+        # 1 Alert per day per level per stock
         if row["Dist_S3_%"] <= 0.15:
             key = f"{sym}_S3"
             if st.session_state["telegram_cooldowns"].get(key) != today_date_str:
@@ -250,10 +254,8 @@ def fetch_gex_option_chain_raw(expiry_date):
         oc_raw = data.get("data", {}).get("oc", {})
         if not oc_raw: return None, spot_price, "Empty options chain."
 
-        # Flawless Dynamic Date Parser
-        try: exp_date_obj = pd.to_datetime(expiry_date[:10]).date()
+        try: exp_date_obj = pd.to_datetime(expiry_date[:10], dayfirst=True).date()
         except: exp_date_obj = datetime.date.today() + datetime.timedelta(days=1)
-            
         T_years = max((exp_date_obj - datetime.date.today()).days, 1) / 365.0
         records = []
         
@@ -316,19 +318,15 @@ def fetch_gex_option_chain(expiry_date):
 def fetch_multi_expiry_vol_structure(spot_price, valid_exp_list):
     vol_data, surface_data = [], []
     for idx, exp in enumerate(valid_exp_list):
-        if idx > 0: time.sleep(3.5) # Hardened 3.5s to completely bypass Dhan rate limits
+        if idx > 0: time.sleep(3.2)
         df_exp, exp_spot, _ = fetch_gex_option_chain_raw(exp)
         if df_exp is not None and not df_exp.empty:
             temp_spot_atm = int(round(exp_spot / 50) * 50)
             atm_row = df_exp[df_exp["Strike"] == temp_spot_atm]
             mean_iv = (atm_row["CE_IV"].values[0] + atm_row["PE_IV"].values[0]) / 2.0 if not atm_row.empty else df_exp["CE_IV"].mean()
-            
-            # Flawless Date Parser
-            try: exp_date_obj = pd.to_datetime(exp[:10]).date()
+            try: exp_date_obj = pd.to_datetime(exp[:10], dayfirst=True).date()
             except: continue
-            
             days = max((exp_date_obj - datetime.date.today()).days, 1)
-
             vol_data.append({"Expiry": exp_date_obj.strftime("%d %b"), "Days": days, "Tenor_Years": days / 365.0, "Mean_IV": max(mean_iv, 0.01)})
             for _, r in df_exp.iterrows():
                 if temp_spot_atm - 600 <= r["Strike"] <= temp_spot_atm + 600: surface_data.append({"Expiry": exp, "Days": days, "Strike": r["Strike"], "IV": (r["CE_IV"] + r["PE_IV"]) / 2.0})
@@ -663,27 +661,6 @@ tot_put_gex, tot_call_gex = abs(df_filtered["Put_GEX"].sum()), df_filtered["Call
 gex_interp = "⚪ Sideways / Pinning" if tot_call_gex > tot_put_gex * 1.3 else ("🔴 Trend Acceleration" if tot_put_gex > tot_call_gex else "🟢 Stable Bounds")
 gex_col = "#FFD700" if "Sideways" in gex_interp else ("#FF5252" if "Acceleration" in gex_interp else "#00E676")
 
-# NET GAMMA EXPOSURE (GEX) CHART RELOCATED TO TOP
-st.markdown('<div class="chart-container" style="margin-top: 20px;"><div class="chart-title">Net Gamma Exposure (GEX) Profile</div>', unsafe_allow_html=True)
-gex_tot = df_filtered['Net_GEX'].sum() if not df_filtered.empty else 0
-gex_interp_str = f"🟢 <b>Live Gamma Regime ({fmt_num(gex_tot)}):</b> Market Makers are Long Gamma. They buy dips and sell rips (Volatility Dampening)." if gex_tot > 0 else f"🔴 <b>Live Gamma Regime ({fmt_num(gex_tot)}):</b> Market Makers are Short Gamma. They sell dips and buy rips (Volatility Accelerating)."
-st.markdown(f'<div class="interp-box">{gex_interp_str}</div>', unsafe_allow_html=True)
-
-call_wall_gex = df_filtered.loc[df_filtered['Call_GEX'].idxmax()]['Strike'] if not df_filtered.empty else atm_strike
-put_wall_gex = df_filtered.loc[df_filtered['Put_GEX'].idxmin()]['Strike'] if not df_filtered.empty else atm_strike
-
-fig_gex = go.Figure()
-fig_gex.add_trace(go.Bar(x=df_filtered["Strike"], y=df_filtered["Net_GEX"], marker_color=["#00E676" if g >= 0 else "#FF5252" for g in df_filtered["Net_GEX"]], name="Net GEX", opacity=0.75))
-fig_gex.add_trace(go.Scatter(x=df_filtered["Strike"], y=df_filtered["ABS_GEX"], mode="lines", name="Absolute GEX", line=dict(color="#29B6F6", width=2, shape="spline", smoothing=1.3)))
-y_max_gex = max(df_filtered["ABS_GEX"].max() if not df_filtered.empty else 1, df_filtered["Net_GEX"].max() if not df_filtered.empty else 1) * 1.1
-fig_gex.add_vline(x=spot_price, line_dash="solid", line_color="#FFD700"); fig_gex.add_annotation(x=spot_price, y=y_max_gex*0.95, text=f"Spot: {spot_price:.1f}", showarrow=False, font=dict(color="#FFD700", size=11))
-fig_gex.add_vline(x=gamma_flip_strike, line_dash="dash", line_color="#29B6F6"); fig_gex.add_annotation(x=gamma_flip_strike, y=y_max_gex*0.85, text=f"Flip: {gamma_flip_strike:.1f}", showarrow=False, font=dict(color="#29B6F6", size=11))
-fig_gex.add_vline(x=call_wall_gex, line_dash="dash", line_color="#00E676"); fig_gex.add_annotation(x=call_wall_gex, y=y_max_gex*0.65, text=f"Call Wall: {call_wall_gex}", showarrow=False, font=dict(color="#00E676", size=11))
-fig_gex.add_vline(x=put_wall_gex, line_dash="dash", line_color="#FF5252"); fig_gex.add_annotation(x=put_wall_gex, y=y_max_gex*0.55, text=f"Put Wall: {put_wall_gex}", showarrow=False, font=dict(color="#FF5252", size=11))
-st.plotly_chart(apply_dark_layout(fig_gex, 400), use_container_width=True, config=PLOT_CONFIG)
-st.markdown('</div>', unsafe_allow_html=True)
-
-
 h1, h2, h3, h4, h5, h6 = st.columns(6)
 h1.plotly_chart(create_h_bar("Total OI", tot_pe_oi, tot_ce_oi, oi_interp, oi_col), use_container_width=True)
 h2.plotly_chart(create_h_bar("OI Change (Full Day)", tot_pe_oichg, tot_ce_oichg, chg_interp, chg_col), use_container_width=True)
@@ -695,13 +672,14 @@ h6.plotly_chart(create_h_bar("Gamma Exp (GEX)", tot_put_gex, tot_call_gex, gex_i
 # ---------------------------------------------------------
 # 9. MASTER TAB INTERFACE
 # ---------------------------------------------------------
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "👑 Prince Analysis",
     "🛡️ Greek Exposure Profiles", 
     "🚀 Intraday & Advanced Analytics", 
     "📈 OpenBull & Fyers Skew", 
     "📊 Options Chain Grid",
-    "🎯 Nifty 50 Camarilla Radar"
+    "🎯 Nifty 50 Camarilla Radar",
+    "⚠️ System Health & Logs"
 ])
 
 with tab1: # PRINCE ANALYSIS
@@ -744,7 +722,7 @@ with tab1: # PRINCE ANALYSIS
         fig_oi_prof.add_trace(go.Bar(x=df_filtered["Strike"], y=df_filtered["CE_OI"], name="Call OI (CE)", marker_color="#00E676"))
         fig_oi_prof.add_vline(x=spot_price, line_dash="solid", line_color="#FFD700")
         fig_oi_prof.update_layout(barmode='group')
-        st.plotly_chart(apply_dark_layout(fig_oi_prof, 250), use_container_width=True, config=PLOT_CONFIG)
+        st.plotly_chart(apply_dark_layout(fig_oi_prof, 250, True, df_filtered, atm_strike), use_container_width=True, config=PLOT_CONFIG)
         st.markdown('</div>', unsafe_allow_html=True)
     with oi_col2:
         st.markdown('<div class="chart-container"><div class="chart-title">OI Change Tracker (Full Day)</div>', unsafe_allow_html=True)
@@ -753,7 +731,7 @@ with tab1: # PRINCE ANALYSIS
         fig_oichg_prof.add_trace(go.Bar(x=df_filtered["Strike"], y=df_filtered.get("CE_OI_Chg_Calc", df_filtered["CE_OI_Chg"]), name="Call OI Chg", marker_color="#00E676"))
         fig_oichg_prof.add_vline(x=spot_price, line_dash="solid", line_color="#FFD700")
         fig_oichg_prof.update_layout(barmode='group')
-        st.plotly_chart(apply_dark_layout(fig_oichg_prof, 250), use_container_width=True, config=PLOT_CONFIG)
+        st.plotly_chart(apply_dark_layout(fig_oichg_prof, 250, True, df_filtered, atm_strike), use_container_width=True, config=PLOT_CONFIG)
         st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="chart-container" style="padding-bottom:10px;"><div class="chart-title">Intraday Absorption & Exhaustion Engine (Synthetic Future vs Options)</div>', unsafe_allow_html=True)
@@ -839,6 +817,8 @@ with tab1: # PRINCE ANALYSIS
 with tab2: # GREEK EXPOSURES
     call_wall_dex = df_filtered.loc[df_filtered['Net_DEX'].idxmax()]['Strike'] if not df_filtered.empty else atm_strike
     put_wall_dex = df_filtered.loc[df_filtered['Net_DEX'].idxmin()]['Strike'] if not df_filtered.empty else atm_strike
+    call_wall_gex = df_filtered.loc[df_filtered['Call_GEX'].idxmax()]['Strike'] if not df_filtered.empty else atm_strike
+    put_wall_gex = df_filtered.loc[df_filtered['Put_GEX'].idxmin()]['Strike'] if not df_filtered.empty else atm_strike
 
     e1, e2 = st.columns(2)
     with e1:
@@ -854,10 +834,27 @@ with tab2: # GREEK EXPOSURES
         fig_dex.add_vline(x=spot_price, line_dash="solid", line_color="#FFD700"); fig_dex.add_annotation(x=spot_price, y=y_max_dex*0.95, text=f"Spot: {spot_price:.1f}", showarrow=False, font=dict(color="#FFD700", size=9))
         fig_dex.add_vline(x=call_wall_dex, line_dash="dash", line_color="#00E676"); fig_dex.add_annotation(x=call_wall_dex, y=y_max_dex*0.85, text=f"Call Wall: {call_wall_dex}", showarrow=False, font=dict(color="#00E676", size=9))
         fig_dex.add_vline(x=put_wall_dex, line_dash="dash", line_color="#FF5252"); fig_dex.add_annotation(x=put_wall_dex, y=y_max_dex*0.75, text=f"Put Wall: {put_wall_dex}", showarrow=False, font=dict(color="#FF5252", size=9))
-        st.plotly_chart(apply_dark_layout(fig_dex, 350), use_container_width=True, config=PLOT_CONFIG)
+        st.plotly_chart(apply_dark_layout(fig_dex, 350, True, df_filtered, atm_strike), use_container_width=True, config=PLOT_CONFIG)
         st.markdown('</div>', unsafe_allow_html=True)
-        
     with e2:
+        st.markdown('<div class="chart-container"><div class="chart-title">Net Gamma Exposure (GEX) By Strike</div>', unsafe_allow_html=True)
+        gex_tot = df_filtered['Net_GEX'].sum() if not df_filtered.empty else 0
+        gex_interp_str = f"🟢 <b>Live Gamma Regime ({fmt_num(gex_tot)}):</b> Market Makers are Long Gamma. They buy dips and sell rips (Volatility Dampening)." if gex_tot > 0 else f"🔴 <b>Live Gamma Regime ({fmt_num(gex_tot)}):</b> Market Makers are Short Gamma. They sell dips and buy rips (Volatility Accelerating)."
+        st.markdown(f'<div class="interp-box">{gex_interp_str}</div>', unsafe_allow_html=True)
+
+        fig_gex = go.Figure()
+        fig_gex.add_trace(go.Bar(x=df_filtered["Strike"], y=df_filtered["Net_GEX"], marker_color=["#00E676" if g >= 0 else "#FF5252" for g in df_filtered["Net_GEX"]], name="Net GEX", opacity=0.75))
+        fig_gex.add_trace(go.Scatter(x=df_filtered["Strike"], y=df_filtered["ABS_GEX"], mode="lines", name="Absolute GEX", line=dict(color="#29B6F6", width=2, shape="spline", smoothing=1.3)))
+        y_max_gex = max(df_filtered["ABS_GEX"].max() if not df_filtered.empty else 1, df_filtered["Net_GEX"].max() if not df_filtered.empty else 1) * 1.1
+        fig_gex.add_vline(x=spot_price, line_dash="solid", line_color="#FFD700"); fig_gex.add_annotation(x=spot_price, y=y_max_gex*0.95, text=f"Spot: {spot_price:.1f}", showarrow=False, font=dict(color="#FFD700", size=9))
+        fig_gex.add_vline(x=gamma_flip_strike, line_dash="dash", line_color="#29B6F6"); fig_gex.add_annotation(x=gamma_flip_strike, y=y_max_gex*0.85, text=f"Flip: {gamma_flip_strike:.1f}", showarrow=False, font=dict(color="#29B6F6", size=9))
+        fig_gex.add_vline(x=call_wall_gex, line_dash="dash", line_color="#00E676"); fig_gex.add_annotation(x=call_wall_gex, y=y_max_gex*0.65, text=f"Call Wall: {call_wall_gex}", showarrow=False, font=dict(color="#00E676", size=9))
+        fig_gex.add_vline(x=put_wall_gex, line_dash="dash", line_color="#FF5252"); fig_gex.add_annotation(x=put_wall_gex, y=y_max_gex*0.55, text=f"Put Wall: {put_wall_gex}", showarrow=False, font=dict(color="#FF5252", size=9))
+        st.plotly_chart(apply_dark_layout(fig_gex, 350, True, df_filtered, atm_strike), use_container_width=True, config=PLOT_CONFIG)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    e3, e4 = st.columns(2)
+    with e3:
         st.markdown('<div class="chart-container"><div class="chart-title">Tradytics Vanna Exposure (VEX)</div>', unsafe_allow_html=True)
         net_vex_tot = df_filtered["Net_VEX"].sum()
         vex_interp_str = f"🟢 <b>Live Vanna Signal ({fmt_num(net_vex_tot)}):</b> Positive Net Vanna means IV expansion forces dealers to buy futures, dampening downside sell-offs." if net_vex_tot > 0 else f"🔴 <b>Live Vanna Signal ({fmt_num(net_vex_tot)}):</b> Negative Net Vanna means IV expansion forces dealers to sell futures, accelerating market downturns."
@@ -866,19 +863,19 @@ with tab2: # GREEK EXPOSURES
         fig_vex.add_trace(go.Bar(x=df_filtered["Strike"], y=df_filtered["PE_VEX"], name="Put VEX (PE)", marker_color="#FF5252"))
         fig_vex.add_trace(go.Bar(x=df_filtered["Strike"], y=df_filtered["CE_VEX"], name="Call VEX (CE)", marker_color="#00E676"))
         fig_vex.update_layout(barmode='group')
-        st.plotly_chart(apply_dark_layout(fig_vex, 350), use_container_width=True, config=PLOT_CONFIG)
+        st.plotly_chart(apply_dark_layout(fig_vex, 250, True, df_filtered, atm_strike), use_container_width=True, config=PLOT_CONFIG)
         st.markdown('</div>', unsafe_allow_html=True)
-
-    st.markdown('<div class="chart-container"><div class="chart-title">Tradytics Charm Exposure (CHEX)</div>', unsafe_allow_html=True)
-    net_chex_tot = df_filtered["Net_CHEX"].sum()
-    chex_interp_str = f"🟢 <b>Live Charm Signal ({fmt_num(net_chex_tot)}):</b> Positive Net Charm indicates time decay forces dealers to steadily buy futures (Bullish drift)." if net_chex_tot > 0 else f"🔴 <b>Live Charm Signal ({fmt_num(net_chex_tot)}):</b> Negative Net Charm indicates time decay forces dealers to sell futures (Bearish drift)."
-    st.markdown(f'<div class="interp-box">{chex_interp_str}</div>', unsafe_allow_html=True)
-    fig_chex = go.Figure()
-    fig_chex.add_trace(go.Bar(x=df_filtered["Strike"], y=df_filtered["PE_CHEX"], name="Put CHEX (PE)", marker_color="#FF5252"))
-    fig_chex.add_trace(go.Bar(x=df_filtered["Strike"], y=df_filtered["CE_CHEX"], name="Call CHEX (CE)", marker_color="#00E676"))
-    fig_chex.update_layout(barmode='group')
-    st.plotly_chart(apply_dark_layout(fig_chex, 250), use_container_width=True, config=PLOT_CONFIG)
-    st.markdown('</div>', unsafe_allow_html=True)
+    with e4:
+        st.markdown('<div class="chart-container"><div class="chart-title">Tradytics Charm Exposure (CHEX)</div>', unsafe_allow_html=True)
+        net_chex_tot = df_filtered["Net_CHEX"].sum()
+        chex_interp_str = f"🟢 <b>Live Charm Signal ({fmt_num(net_chex_tot)}):</b> Positive Net Charm indicates time decay forces dealers to steadily buy futures (Bullish drift)." if net_chex_tot > 0 else f"🔴 <b>Live Charm Signal ({fmt_num(net_chex_tot)}):</b> Negative Net Charm indicates time decay forces dealers to sell futures (Bearish drift)."
+        st.markdown(f'<div class="interp-box">{chex_interp_str}</div>', unsafe_allow_html=True)
+        fig_chex = go.Figure()
+        fig_chex.add_trace(go.Bar(x=df_filtered["Strike"], y=df_filtered["PE_CHEX"], name="Put CHEX (PE)", marker_color="#FF5252"))
+        fig_chex.add_trace(go.Bar(x=df_filtered["Strike"], y=df_filtered["CE_CHEX"], name="Call CHEX (CE)", marker_color="#00E676"))
+        fig_chex.update_layout(barmode='group')
+        st.plotly_chart(apply_dark_layout(fig_chex, 250, True, df_filtered, atm_strike), use_container_width=True, config=PLOT_CONFIG)
+        st.markdown('</div>', unsafe_allow_html=True)
 
 with tab3: # INTRADAY & ADVANCED ANALYTICS (MERGED)
     r1c1, r1c2 = st.columns(2)
@@ -1019,7 +1016,7 @@ with tab4: # OPENBULL & FYERS SKEW
         fig_smile.add_trace(go.Scatter(x=df_filtered["Strike"], y=df_filtered["PE_IV"], mode="lines+markers", name="Put IV (PE)", line=dict(color="#FF5252", width=2)))
         fig_smile.add_trace(go.Scatter(x=df_filtered["Strike"], y=df_filtered["CE_IV"], mode="lines+markers", name="Call IV (CE)", line=dict(color="#00E676", width=2)))
         fig_smile.add_vline(x=spot_price, line_dash="solid", line_color="#FFD700")
-        st.plotly_chart(apply_dark_layout(fig_smile, 250), use_container_width=True, config=PLOT_CONFIG)
+        st.plotly_chart(apply_dark_layout(fig_smile, 250, True, df_filtered, atm_strike), use_container_width=True, config=PLOT_CONFIG)
         st.markdown('</div>', unsafe_allow_html=True)
         
     with v2:
