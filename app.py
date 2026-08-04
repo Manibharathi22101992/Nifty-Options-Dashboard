@@ -54,6 +54,13 @@ except Exception as e:
     YF_AVAILABLE = False
     log_error(f"yFinance Import Failed: {e}")
 
+try:
+    from scipy.stats import norm
+    SCIPY_AVAILABLE = True
+except Exception as e:
+    SCIPY_AVAILABLE = False
+    log_error(f"Scipy missing. Fallback to math.erf (slower).")
+
 NIFTY_50_WEIGHTS = {
     "HDFCBANK.NS": 11.6, "RELIANCE.NS": 9.8, "ICICIBANK.NS": 7.9, "INFY.NS": 5.8, "ITC.NS": 4.5,
     "TCS.NS": 4.1, "LT.NS": 3.4, "AXISBANK.NS": 3.2, "KOTAKBANK.NS": 2.8, "SBIN.NS": 2.7,
@@ -174,7 +181,7 @@ def process_camarilla_alerts(df_camarilla, is_market_live, today_date_str):
                 st.session_state["telegram_cooldowns"][key] = today_date_str
 
 # ---------------------------------------------------------
-# 4. MATHEMATICAL ENGINE & GREEKS (COMPLETELY REWRITTEN)
+# 4. MATHEMATICAL ENGINE & GREEKS
 # ---------------------------------------------------------
 def calculate_bs_greeks(S, K, T, iv_ce, iv_pe, r=RISK_FREE_RATE, q=NIFTY_DIVIDEND_YIELD):
     """Accurate Dual-IV Greek engine generating exactly 13 explicit metrics."""
@@ -198,28 +205,22 @@ def calculate_bs_greeks(S, K, T, iv_ce, iv_pe, r=RISK_FREE_RATE, q=NIFTY_DIVIDEN
 
         exp_qT = math.exp(-q * T)
         
-        # 1-3. Deltas & Gamma
         ce_delta = exp_qT * cdf_ce
         pe_delta = exp_qT * (cdf_pe - 1.0)
         gamma = exp_qT * pdf_ce / (S * iv_ce * math.sqrt(T))
 
-        # 4-5. Vega
         ce_vega = S * exp_qT * pdf_ce * math.sqrt(T) / 100.0  
         pe_vega = S * exp_qT * pdf_pe * math.sqrt(T) / 100.0
 
-        # 6-7. Vanna
         ce_vanna = -exp_qT * pdf_ce * d2_ce / iv_ce
         pe_vanna = -exp_qT * pdf_pe * d2_pe / iv_pe
 
-        # 8-9. Charm
         ce_charm = q * exp_qT * cdf_ce - exp_qT * pdf_ce * (2 * (r - q) * T - d2_ce * iv_ce * math.sqrt(T)) / (2 * T * iv_ce * math.sqrt(T))
         pe_charm = q * exp_qT * cdf_pe - exp_qT * pdf_pe * (2 * (r - q) * T - d2_pe * iv_pe * math.sqrt(T)) / (2 * T * iv_pe * math.sqrt(T)) - q * exp_qT
 
-        # 10-11. Speed
         ce_speed = -exp_qT * pdf_ce / (S**2 * iv_ce * math.sqrt(T)) * (1.0 + d1_ce / (iv_ce * math.sqrt(T)))
         pe_speed = -exp_qT * pdf_pe / (S**2 * iv_pe * math.sqrt(T)) * (1.0 + d1_pe / (iv_pe * math.sqrt(T)))
 
-        # 12-13. Vomma
         ce_vomma = ce_vega * d1_ce * d2_ce / iv_ce
         pe_vomma = pe_vega * d1_pe * d2_pe / iv_pe
         
@@ -519,6 +520,7 @@ selected_target_strike = st.sidebar.selectbox("🎯 Target Strike", df_oc["Strik
 
 gamma_flip_strike = interpolate_gamma_flip(df_oc)
 df_filtered = df_oc[(df_oc["Strike"] >= atm_strike - 550) & (df_oc["Strike"] <= atm_strike + 550)].copy()
+df_chart_view = df_filtered[(df_filtered["Strike"] >= atm_strike - 350) & (df_filtered["Strike"] <= atm_strike + 350)].copy()
 
 total_ce_oi_sum, total_pe_oi_sum = df_oc["CE_OI"].sum(), df_oc["PE_OI"].sum()
 now_ts = int(time.time())
@@ -597,29 +599,6 @@ abs_df, oi_snap, iv_hist, pcr_df, gex_df, doi_df, strad_df, synth_df = st.sessio
 # PREMIUM HERO BANNER
 st.markdown(f'<div class="hero-banner"><div style="color:var(--text-muted); font-size:1.1rem; font-weight:800; letter-spacing:1px; margin-bottom:5px;">NIFTY SYNTHETIC FUTURE (TRUE FWD)</div><div style="color:var(--text-main); font-size:3.5rem; font-weight:900; letter-spacing:-1px; text-shadow: 0px 0px 10px rgba(255,255,255,0.1);">₹{synthetic_future:,.2f}</div><div style="color:var(--amber); font-size:1rem; font-weight:600; margin-top:5px;">Spot Market: ₹{spot_price:,.2f} &nbsp;&nbsp;|&nbsp;&nbsp; Interpolated Gamma Flip: {gamma_flip_strike:.1f}</div></div>', unsafe_allow_html=True)
 
-# NET GAMMA EXPOSURE (GEX) CHART RELOCATED TO TOP
-st.markdown('<div class="chart-container" style="margin-top: 20px;"><div class="chart-title">Net Gamma Exposure (GEX) Profile</div>', unsafe_allow_html=True)
-gex_tot = df_filtered['Net_GEX'].sum() if not df_filtered.empty else 0
-gex_interp_str = f"🟢 <b>Live Gamma Regime ({fmt_num(gex_tot)}):</b> Market Makers are Long Gamma. They buy dips and sell rips (Volatility Dampening)." if gex_tot > 0 else f"🔴 <b>Live Gamma Regime ({fmt_num(gex_tot)}):</b> Market Makers are Short Gamma. They sell dips and buy rips (Volatility Accelerating)."
-st.markdown(f'<div class="interp-box">{gex_interp_str}</div>', unsafe_allow_html=True)
-
-call_wall_gex = df_filtered.loc[df_filtered['Call_GEX'].idxmax()]['Strike'] if not df_filtered.empty else atm_strike
-put_wall_gex = df_filtered.loc[df_filtered['Put_GEX'].idxmin()]['Strike'] if not df_filtered.empty else atm_strike
-
-# Zoomed View for visual clarity
-df_chart_view = df_filtered[(df_filtered["Strike"] >= atm_strike - 350) & (df_filtered["Strike"] <= atm_strike + 350)].copy()
-
-fig_gex = go.Figure()
-fig_gex.add_trace(go.Bar(x=df_chart_view["Strike"], y=df_chart_view["Net_GEX"], marker_color=["#00E676" if g >= 0 else "#FF5252" for g in df_chart_view["Net_GEX"]], name="Net GEX", opacity=0.85))
-fig_gex.add_trace(go.Scatter(x=df_chart_view["Strike"], y=df_chart_view["ABS_GEX"], mode="lines", name="Absolute GEX", line=dict(color="#29B6F6", width=3, shape="spline", smoothing=1.3)))
-y_max_gex = max(df_chart_view["ABS_GEX"].max() if not df_chart_view.empty else 1, df_chart_view["Net_GEX"].max() if not df_chart_view.empty else 1) * 1.25
-fig_gex.add_vline(x=spot_price, line_dash="solid", line_color="#FFD700"); fig_gex.add_annotation(x=spot_price, y=y_max_gex*0.95, text=f"Spot: {spot_price:.1f}", showarrow=False, font=dict(color="#FFD700", size=11))
-fig_gex.add_vline(x=gamma_flip_strike, line_dash="dash", line_color="#29B6F6"); fig_gex.add_annotation(x=gamma_flip_strike, y=y_max_gex*0.85, text=f"Flip: {gamma_flip_strike:.1f}", showarrow=False, font=dict(color="#29B6F6", size=11))
-fig_gex.add_vline(x=call_wall_gex, line_dash="dash", line_color="#00E676"); fig_gex.add_annotation(x=call_wall_gex, y=y_max_gex*0.65, text=f"Call Wall: {call_wall_gex}", showarrow=False, font=dict(color="#00E676", size=11))
-fig_gex.add_vline(x=put_wall_gex, line_dash="dash", line_color="#FF5252"); fig_gex.add_annotation(x=put_wall_gex, y=y_max_gex*0.55, text=f"Put Wall: {put_wall_gex}", showarrow=False, font=dict(color="#FF5252", size=11))
-st.plotly_chart(apply_dark_layout(fig_gex, 450, True, df_chart_view, atm_strike), use_container_width=True, config=PLOT_CONFIG)
-st.markdown('</div>', unsafe_allow_html=True)
-
 # ---------------------------------------------------------
 # 8. AGGREGATE OPTIONS FLOW BAR
 # ---------------------------------------------------------
@@ -649,13 +628,17 @@ chex_col = "#00E676" if tot_pe_chex > tot_ce_chex else "#FF5252"
 tot_pe_vex, tot_ce_vex = df_filtered["PE_VEX"].sum(), df_filtered["CE_VEX"].sum()
 vex_interp = "🟢 Vol Squeeze Risk" if tot_pe_vex > tot_ce_vex else "🔴 Vol Crush Expected"
 vex_col = "#00E676" if tot_pe_vex > tot_ce_vex else "#FF5252"
+tot_put_gex, tot_call_gex = abs(df_filtered["Put_GEX"].sum()), df_filtered["Call_GEX"].sum()
+gex_interp = "⚪ Sideways / Pinning" if tot_call_gex > tot_put_gex * 1.3 else ("🔴 Trend Acceleration" if tot_put_gex > tot_call_gex else "🟢 Stable Bounds")
+gex_col = "#FFD700" if "Sideways" in gex_interp else ("#FF5252" if "Acceleration" in gex_interp else "#00E676")
 
-h1, h2, h3, h4, h5 = st.columns(5)
+h1, h2, h3, h4, h5, h6 = st.columns(6)
 h1.plotly_chart(create_h_bar("Total OI", tot_pe_oi, tot_ce_oi, oi_interp, oi_col), use_container_width=True)
 h2.plotly_chart(create_h_bar("OI Change (Full Day)", tot_pe_oichg, tot_ce_oichg, chg_interp, chg_col), use_container_width=True)
 h3.plotly_chart(create_h_bar("Volume", tot_pe_vol, tot_ce_vol, vol_interp, vol_col), use_container_width=True)
 h4.plotly_chart(create_h_bar("Theta Exp (CHEX)", tot_pe_chex, tot_ce_chex, chex_interp, chex_col), use_container_width=True)
 h5.plotly_chart(create_h_bar("Vega Exp (VEX)", tot_pe_vex, tot_ce_vex, vex_interp, vex_col), use_container_width=True)
+h6.plotly_chart(create_h_bar("Gamma Exp (GEX)", tot_put_gex, tot_call_gex, gex_interp, gex_col), use_container_width=True)
 
 # ---------------------------------------------------------
 # 9. MASTER TAB INTERFACE
@@ -795,16 +778,34 @@ with tab1: # PRINCE ANALYSIS
     st.markdown('</div>', unsafe_allow_html=True)
 
 with tab2: # GREEK EXPOSURES
+    # NET GAMMA EXPOSURE (GEX) FULL WIDTH TOP
+    st.markdown('<div class="chart-container"><div class="chart-title">Net Gamma Exposure (GEX) Profile</div>', unsafe_allow_html=True)
+    gex_tot = df_filtered['Net_GEX'].sum() if not df_filtered.empty else 0
+    gex_interp_str = f"🟢 <b>Live Gamma Regime ({fmt_num(gex_tot)}):</b> Market Makers are Long Gamma. They buy dips and sell rips (Volatility Dampening)." if gex_tot > 0 else f"🔴 <b>Live Gamma Regime ({fmt_num(gex_tot)}):</b> Market Makers are Short Gamma. They sell dips and buy rips (Volatility Accelerating)."
+    st.markdown(f'<div class="interp-box">{gex_interp_str}</div>', unsafe_allow_html=True)
+
+    call_wall_gex = df_filtered.loc[df_filtered['Call_GEX'].idxmax()]['Strike'] if not df_filtered.empty else atm_strike
+    put_wall_gex = df_filtered.loc[df_filtered['Put_GEX'].idxmin()]['Strike'] if not df_filtered.empty else atm_strike
     call_wall_dex = df_filtered.loc[df_filtered['Net_DEX'].idxmax()]['Strike'] if not df_filtered.empty else atm_strike
     put_wall_dex = df_filtered.loc[df_filtered['Net_DEX'].idxmin()]['Strike'] if not df_filtered.empty else atm_strike
 
+    fig_gex = go.Figure()
+    fig_gex.add_trace(go.Bar(x=df_chart_view["Strike"], y=df_chart_view["Net_GEX"], marker_color=["#00E676" if g >= 0 else "#FF5252" for g in df_chart_view["Net_GEX"]], name="Net GEX", opacity=0.85))
+    fig_gex.add_trace(go.Scatter(x=df_chart_view["Strike"], y=df_chart_view["ABS_GEX"], mode="lines", name="Absolute GEX", line=dict(color="#29B6F6", width=3, shape="spline", smoothing=1.3)))
+    y_max_gex = max(df_chart_view["ABS_GEX"].max() if not df_chart_view.empty else 1, df_chart_view["Net_GEX"].max() if not df_chart_view.empty else 1) * 1.25
+    fig_gex.add_vline(x=spot_price, line_dash="solid", line_color="#FFD700"); fig_gex.add_annotation(x=spot_price, y=y_max_gex*0.95, text=f"Spot: {spot_price:.1f}", showarrow=False, font=dict(color="#FFD700", size=11))
+    fig_gex.add_vline(x=gamma_flip_strike, line_dash="dash", line_color="#29B6F6"); fig_gex.add_annotation(x=gamma_flip_strike, y=y_max_gex*0.85, text=f"Flip: {gamma_flip_strike:.1f}", showarrow=False, font=dict(color="#29B6F6", size=11))
+    fig_gex.add_vline(x=call_wall_gex, line_dash="dash", line_color="#00E676"); fig_gex.add_annotation(x=call_wall_gex, y=y_max_gex*0.65, text=f"Call Wall: {call_wall_gex}", showarrow=False, font=dict(color="#00E676", size=11))
+    fig_gex.add_vline(x=put_wall_gex, line_dash="dash", line_color="#FF5252"); fig_gex.add_annotation(x=put_wall_gex, y=y_max_gex*0.55, text=f"Put Wall: {put_wall_gex}", showarrow=False, font=dict(color="#FF5252", size=11))
+    st.plotly_chart(apply_dark_layout(fig_gex, 450, True, df_chart_view, atm_strike), use_container_width=True, config=PLOT_CONFIG)
+    st.markdown('</div>', unsafe_allow_html=True)
+
     e1, e2 = st.columns(2)
     with e1:
-        st.markdown('<div class="chart-container"><div class="chart-title">Net Delta Exposure (DEX) By Strike</div>', unsafe_allow_html=True)
+        st.markdown('<div class="chart-container"><div class="chart-title">Net Delta Exposure (DEX)</div>', unsafe_allow_html=True)
         dex_tot = df_filtered['Net_DEX'].sum() if not df_filtered.empty else 0
-        dex_interp_str = f"🟢 <b>Live Delta Bias ({fmt_num(dex_tot)}):</b> Market Makers are Long Delta. They will sell underlying to hedge down-moves (Support)." if dex_tot > 0 else f"🔴 <b>Live Delta Bias ({fmt_num(dex_tot)}):</b> Market Makers are Short Delta. They will buy underlying to hedge up-moves (Resistance)."
+        dex_interp_str = f"🟢 <b>Bias ({fmt_num(dex_tot)}):</b> Market Makers Long Delta." if dex_tot > 0 else f"🔴 <b>Bias ({fmt_num(dex_tot)}):</b> Market Makers Short Delta."
         st.markdown(f'<div class="interp-box">{dex_interp_str}</div>', unsafe_allow_html=True)
-        
         fig_dex = go.Figure()
         fig_dex.add_trace(go.Bar(x=df_chart_view["Strike"], y=df_chart_view["Net_DEX"], marker_color=["#00E676" if val >= 0 else "#FF5252" for val in df_chart_view["Net_DEX"]], name="Net DEX", opacity=0.75))
         fig_dex.add_trace(go.Scatter(x=df_chart_view["Strike"], y=df_chart_view["ABS_DEX"], mode="lines", name="Absolute DEX", line=dict(color="#FFA726", width=2, shape="spline", smoothing=1.3)))
@@ -817,7 +818,7 @@ with tab2: # GREEK EXPOSURES
     with e2:
         st.markdown('<div class="chart-container"><div class="chart-title">Tradytics Vanna Exposure (VEX)</div>', unsafe_allow_html=True)
         net_vex_tot = df_filtered["Net_VEX"].sum()
-        vex_interp_str = f"🟢 <b>Live Vanna Signal ({fmt_num(net_vex_tot)}):</b> Positive Net Vanna means IV expansion forces dealers to buy futures, dampening downside sell-offs." if net_vex_tot > 0 else f"🔴 <b>Live Vanna Signal ({fmt_num(net_vex_tot)}):</b> Negative Net Vanna means IV expansion forces dealers to sell futures, accelerating market downturns."
+        vex_interp_str = f"🟢 <b>Signal ({fmt_num(net_vex_tot)}):</b> IV expansion buys futures." if net_vex_tot > 0 else f"🔴 <b>Signal ({fmt_num(net_vex_tot)}):</b> IV expansion sells futures."
         st.markdown(f'<div class="interp-box">{vex_interp_str}</div>', unsafe_allow_html=True)
         fig_vex = go.Figure()
         fig_vex.add_trace(go.Bar(x=df_chart_view["Strike"], y=df_chart_view["PE_VEX"], name="Put VEX (PE)", marker_color="#FF5252"))
@@ -826,16 +827,29 @@ with tab2: # GREEK EXPOSURES
         st.plotly_chart(apply_dark_layout(fig_vex, 350, True, df_chart_view, atm_strike), use_container_width=True, config=PLOT_CONFIG)
         st.markdown('</div>', unsafe_allow_html=True)
 
-    st.markdown('<div class="chart-container"><div class="chart-title">Tradytics Charm Exposure (CHEX)</div>', unsafe_allow_html=True)
-    net_chex_tot = df_filtered["Net_CHEX"].sum()
-    chex_interp_str = f"🟢 <b>Live Charm Signal ({fmt_num(net_chex_tot)}):</b> Positive Net Charm indicates time decay forces dealers to steadily buy futures (Bullish drift)." if net_chex_tot > 0 else f"🔴 <b>Live Charm Signal ({fmt_num(net_chex_tot)}):</b> Negative Net Charm indicates time decay forces dealers to sell futures (Bearish drift)."
-    st.markdown(f'<div class="interp-box">{chex_interp_str}</div>', unsafe_allow_html=True)
-    fig_chex = go.Figure()
-    fig_chex.add_trace(go.Bar(x=df_chart_view["Strike"], y=df_chart_view["PE_CHEX"], name="Put CHEX (PE)", marker_color="#FF5252"))
-    fig_chex.add_trace(go.Bar(x=df_chart_view["Strike"], y=df_chart_view["CE_CHEX"], name="Call CHEX (CE)", marker_color="#00E676"))
-    fig_chex.update_layout(barmode='group')
-    st.plotly_chart(apply_dark_layout(fig_chex, 250, True, df_chart_view, atm_strike), use_container_width=True, config=PLOT_CONFIG)
-    st.markdown('</div>', unsafe_allow_html=True)
+    e3, e4 = st.columns(2)
+    with e3:
+        st.markdown('<div class="chart-container"><div class="chart-title">Tradytics Charm Exposure (CHEX)</div>', unsafe_allow_html=True)
+        net_chex_tot = df_filtered["Net_CHEX"].sum()
+        chex_interp_str = f"🟢 <b>Signal ({fmt_num(net_chex_tot)}):</b> Time decay drifts Bullish." if net_chex_tot > 0 else f"🔴 <b>Signal ({fmt_num(net_chex_tot)}):</b> Time decay drifts Bearish."
+        st.markdown(f'<div class="interp-box">{chex_interp_str}</div>', unsafe_allow_html=True)
+        fig_chex = go.Figure()
+        fig_chex.add_trace(go.Bar(x=df_chart_view["Strike"], y=df_chart_view["PE_CHEX"], name="Put CHEX (PE)", marker_color="#FF5252"))
+        fig_chex.add_trace(go.Bar(x=df_chart_view["Strike"], y=df_chart_view["CE_CHEX"], name="Call CHEX (CE)", marker_color="#00E676"))
+        fig_chex.update_layout(barmode='group')
+        st.plotly_chart(apply_dark_layout(fig_chex, 250, True, df_chart_view, atm_strike), use_container_width=True, config=PLOT_CONFIG)
+        st.markdown('</div>', unsafe_allow_html=True)
+    with e4:
+        st.markdown('<div class="chart-container"><div class="chart-title">Tradytics Speed Exposure (SPEX)</div>', unsafe_allow_html=True)
+        net_spex_tot = df_filtered["Net_SPEX"].sum()
+        spex_interp_str = f"🟢 <b>Signal ({fmt_num(net_spex_tot)}):</b> High positive Speed points to rapid Gamma expansion." if net_spex_tot > 0 else f"🔴 <b>Signal ({fmt_num(net_spex_tot)}):</b> Negative Speed points to stabilizing Gamma."
+        st.markdown(f'<div class="interp-box">{spex_interp_str}</div>', unsafe_allow_html=True)
+        fig_spex = go.Figure()
+        fig_spex.add_trace(go.Bar(x=df_chart_view["Strike"], y=df_chart_view["PE_SPEX"], name="Put SPEX (PE)", marker_color="#FF5252"))
+        fig_spex.add_trace(go.Bar(x=df_chart_view["Strike"], y=df_chart_view["CE_SPEX"], name="Call SPEX (CE)", marker_color="#00E676"))
+        fig_spex.update_layout(barmode='group')
+        st.plotly_chart(apply_dark_layout(fig_spex, 250, True, df_chart_view, atm_strike), use_container_width=True, config=PLOT_CONFIG)
+        st.markdown('</div>', unsafe_allow_html=True)
 
 with tab3: # INTRADAY & ADVANCED ANALYTICS
     r1c1, r1c2 = st.columns(2)
