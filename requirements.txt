@@ -1,4 +1,4 @@
-streamlit>=1.31.0
+streamlit
 streamlit-autorefresh
 pandas
 numpy
@@ -6,4 +6,3 @@ scipy
 plotly
 requests
 yfinance
-dhanhq
