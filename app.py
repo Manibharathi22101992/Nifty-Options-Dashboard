@@ -321,8 +321,18 @@ def fetch_gex_option_chain_raw(expiry_date):
             for strike_str, details in oc_raw.items():
                 strike = int(float(strike_str))
                 ce, pe = details.get("ce", {}), details.get("pe", {})
+                
+                # Fetch Current OI
                 ce_oi, pe_oi = float(ce.get("oi", 0)), float(pe.get("oi", 0))
-                ce_oichg, pe_oichg = float(ce.get("oi_change", ce.get("change_in_oi", 0))), float(pe.get("oi_change", pe.get("change_in_oi", 0)))
+                # Fetch Previous Day OI. If missing, fallback to current OI (meaning 0 change)
+                ce_prev_val, pe_prev_val = ce.get("previous_oi"), pe.get("previous_oi")
+                ce_prev_oi = float(ce_prev_val) if ce_prev_val is not None else ce_oi
+                pe_prev_oi = float(pe_prev_val) if pe_prev_val is not None else pe_oi
+                
+                # Accurately compute Full-Day Change natively
+                ce_oichg = ce_oi - ce_prev_oi
+                pe_oichg = pe_oi - pe_prev_oi
+
                 ce_vol, pe_vol = float(ce.get("volume") or 0.0), float(pe.get("volume") or 0.0)
                 ce_ltp, pe_ltp = float(ce.get("last_price", 0)), float(pe.get("last_price", 0))
                 ce_iv, pe_iv = float(ce.get("implied_volatility", 0))/100.0, float(pe.get("implied_volatility", 0))/100.0
@@ -505,13 +515,6 @@ else:
             gamma_flip_strike = int((df_sorted.iloc[i-1]["Strike"] + df_sorted.iloc[i]["Strike"]) / 2.0)
             break
 
-    # Re-calculate max_pain_strike (Restored to fix NameError)
-    max_pain_strike = atm_strike
-    pain_records = [{"Strike": k, "Writer_Loss": (df_oc["CE_OI"] * (k - df_oc["Strike"]).clip(lower=0)).sum() + (df_oc["PE_OI"] * (df_oc["Strike"] - k).clip(lower=0)).sum()} for k in df_oc["Strike"] if atm_strike - 1500 <= k <= atm_strike + 1500]
-    if pain_records:
-        df_pain_temp = pd.DataFrame(pain_records)
-        max_pain_strike = df_pain_temp.loc[df_pain_temp["Writer_Loss"].idxmin()]["Strike"]
-
     target_row = df_oc[df_oc["Strike"] == selected_target_strike]
     target_iv_spread = (target_row["CE_IV"].values[0] if not target_row.empty else 0.0) - (target_row["PE_IV"].values[0] if not target_row.empty else 0.0)
 
@@ -615,7 +618,7 @@ else:
     strad_reg = strad_df.iloc[-1]["Regime"] if not strad_df.empty else "NORMAL"
 
     n1, n2, n3, n4 = st.columns(4)
-    n1.markdown(f'<div class="metric-card metric-card-amber"><div class="metric-title">NIFTY SYNTH FUT (ATM)</div><div class="metric-value">₹{synthetic_future:,.2f}</div><div class="metric-sub sub-amber">Spot: ₹{spot_price:,.2f} | Pain: {max_pain_strike}</div></div>', unsafe_allow_html=True)
+    n1.markdown(f'<div class="metric-card metric-card-amber"><div class="metric-title">NIFTY SYNTH FUT (ATM)</div><div class="metric-value">₹{synthetic_future:,.2f}</div><div class="metric-sub sub-amber">Spot: ₹{spot_price:,.2f} | Flip: {gamma_flip_strike}</div></div>', unsafe_allow_html=True)
     n2.markdown(f'<div class="metric-card {"metric-card-green" if target_iv_spread >= 0 else "metric-card-red"}"><div class="metric-title">{selected_target_strike} IV SPREAD</div><div class="metric-value">{target_iv_spread:+.2f}%</div><div class="metric-sub {"sub-green" if target_iv_spread >= 0 else "sub-red"}">CE {(target_row["CE_IV"].values[0]*100) if not target_row.empty else 0:.1f}% | PE {(target_row["PE_IV"].values[0]*100) if not target_row.empty else 0:.1f}%</div></div>', unsafe_allow_html=True)
     dp_15m = pcr_df.iloc[-1]["Delta_PCR_15m"] if not pcr_df.empty else 0.0
     n3.markdown(f'<div class="metric-card {"metric-card-green" if dp_15m >= 0.15 else ("metric-card-red" if dp_15m <= -0.15 else "metric-card-amber")}"><div class="metric-title">ΔPCR 15M VELOCITY</div><div class="metric-value">{dp_15m:+.2f}</div><div class="metric-sub {"sub-green" if dp_15m >= 0.15 else ("sub-red" if dp_15m <= -0.15 else "sub-amber")}">PCR: {pcr_df.iloc[-1]["PCR"] if not pcr_df.empty else 0:.2f}</div></div>', unsafe_allow_html=True)
@@ -634,17 +637,8 @@ else:
     oi_interp = "🟢 Uptrend / Strong Support" if tot_pe_oi > tot_ce_oi * 1.15 else ("🔴 Downtrend / Resistance" if tot_ce_oi > tot_pe_oi * 1.15 else "⚪ Balanced Structure")
     oi_col = "#00E676" if "Uptrend" in oi_interp else ("#FF5252" if "Downtrend" in oi_interp else "#8A93A6")
 
-    # True Full Day OI Change using robust Snapshot Difference from memory
-    today_snaps = oi_snap[oi_snap["Date"] == today_date_str]
-    if not today_snaps.empty:
-        first_ts = today_snaps["Timestamp"].min()
-        first_snap = today_snaps[today_snaps["Timestamp"] == first_ts]
-        df_filtered["CE_OI_Chg_Calc"] = df_filtered["CE_OI"] - df_filtered["CE_OI"].map(first_snap.set_index("Strike")["CE_OI"]).fillna(df_filtered["CE_OI"])
-        df_filtered["PE_OI_Chg_Calc"] = df_filtered["PE_OI"] - df_filtered["PE_OI"].map(first_snap.set_index("Strike")["PE_OI"]).fillna(df_filtered["PE_OI"])
-        tot_ce_oichg, tot_pe_oichg = df_filtered["CE_OI_Chg_Calc"].sum(), df_filtered["PE_OI_Chg_Calc"].sum()
-    else:
-        tot_ce_oichg, tot_pe_oichg = df_filtered["CE_OI_Chg"].sum(), df_filtered["PE_OI_Chg"].sum()
-        df_filtered["CE_OI_Chg_Calc"], df_filtered["PE_OI_Chg_Calc"] = df_filtered["CE_OI_Chg"], df_filtered["PE_OI_Chg"]
+    # True Full Day OI Change using Exchange Values directly
+    tot_ce_oichg, tot_pe_oichg = df_filtered["CE_OI_Chg"].sum(), df_filtered["PE_OI_Chg"].sum()
 
     chg_interp = "🟢 Bullish Momentum" if tot_pe_oichg > tot_ce_oichg * 1.2 else ("🔴 Bearish Pressure" if tot_ce_oichg > tot_pe_oichg * 1.2 else "⚪ Neutral Building")
     chg_col = "#00E676" if "Bullish" in chg_interp else ("#FF5252" if "Bearish" in chg_interp else "#8A93A6")
@@ -673,7 +667,6 @@ else:
     h5.plotly_chart(create_h_bar("Vega Exp (VEX)", tot_pe_vex, tot_ce_vex, vex_interp, vex_col), use_container_width=True)
     h6.plotly_chart(create_h_bar("Gamma Exp (GEX)", tot_put_gex, tot_call_gex, gex_interp, gex_col), use_container_width=True)
 
-    # 8C. TABBED INTERFACE
     tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
         "🚀 Intraday Flow Center", 
         "👑 Prince Analysis",
@@ -689,8 +682,9 @@ else:
         with r1c1:
             st.markdown(f'<div class="chart-container"><div class="chart-title">Intraday IV Spread Movement ({selected_target_strike})</div>', unsafe_allow_html=True)
             fig_ts = go.Figure()
-            strike_history = iv_hist[iv_hist["Strike"] == selected_target_strike] if not iv_hist.empty else pd.DataFrame()
-            if not strike_history.empty: fig_ts.add_trace(go.Scatter(x=strike_history["Time"], y=strike_history["IV_Spread"], mode="lines+markers", line=dict(color="#29B6F6", width=2), marker=dict(size=3)))
+            if not iv_hist.empty: 
+                strike_history = iv_hist[iv_hist["Strike"] == selected_target_strike]
+                if not strike_history.empty: fig_ts.add_trace(go.Scatter(x=strike_history["Time"], y=strike_history["IV_Spread"], mode="lines+markers", line=dict(color="#29B6F6", width=2), marker=dict(size=3)))
             fig_ts.add_hline(y=0, line_dash="dash", line_color="white", opacity=0.3)
             st.plotly_chart(apply_dark_layout(fig_ts), use_container_width=True, config=PLOT_CONFIG)
             st.markdown('</div>', unsafe_allow_html=True)
@@ -740,6 +734,35 @@ else:
             st.markdown('</div>', unsafe_allow_html=True)
 
     with tab2: # PRINCE ANALYSIS
+        v1, v2 = st.columns(2)
+        with v1:
+            st.markdown('<div class="chart-container"><div class="chart-title">Forward Vol Term Structure (Active + 3 Expiries)</div>', unsafe_allow_html=True)
+            exp_list = [selected_expiry] + [x for x in valid_expiries if x != selected_expiry][:3]
+            df_vol_struct, df_surface = fetch_multi_expiry_vol_structure(spot_price, exp_list)
+            
+            if not df_vol_struct.empty and len(df_vol_struct) >= 2:
+                is_backwardation = df_vol_struct.iloc[0]["Mean_IV"] > df_vol_struct.iloc[-1]["Mean_IV"]
+                term_str = "🔴 <b>Live Structure: Backwardation</b> (Front IV > Far IV) — Near-term panic pricing in." if is_backwardation else "🟢 <b>Live Structure: Contango</b> (Front IV < Far IV) — Normal market decay."
+                st.markdown(f'<div class="interp-box">{term_str}</div>', unsafe_allow_html=True)
+                fig_fwd = go.Figure()
+                fig_fwd.add_trace(go.Scatter(x=df_vol_struct["Expiry"], y=df_vol_struct["Forward_Vol"], mode="lines+markers", name="Forward Vol", line=dict(color="#00E676", width=2.5)))
+                fig_fwd.add_trace(go.Scatter(x=df_vol_struct["Expiry"], y=df_vol_struct["Mean_IV"], mode="lines+markers", name="Mean IV", line=dict(color="#AB47BC", width=2.5, dash="dot")))
+                st.plotly_chart(apply_dark_layout(fig_fwd), use_container_width=True, config=PLOT_CONFIG)
+            else: st.info("Loading Term Structure Data... Bypassing Dhan Rate Limits (Takes ~10 seconds)")
+            st.markdown('</div>', unsafe_allow_html=True)
+        with v2:
+            st.markdown('<div class="chart-container"><div class="chart-title">ATM IV vs Nifty Spot Price</div>', unsafe_allow_html=True)
+            fig_iv_price = make_subplots(specs=[[{"secondary_y": True}]])
+            if not iv_hist.empty:
+                atm_hist = iv_hist[iv_hist["Strike"] == atm_strike]
+                if not atm_hist.empty:
+                    fig_iv_price.add_trace(go.Scatter(x=atm_hist["Time"], y=(atm_hist["CE_IV"]+atm_hist["PE_IV"])/2.0*100, mode="lines", name="ATM IV", line=dict(color="#AB47BC", width=2)), secondary_y=False)
+                    fig_iv_price.add_trace(go.Scatter(x=atm_hist["Time"], y=atm_hist["Spot"], mode="lines", name="Price", line=dict(color="#FF5252", width=2)), secondary_y=True)
+            fig_iv_price.update_yaxes(title_text="ATM IV (%)", secondary_y=False, gridcolor="#2A2E39")
+            fig_iv_price.update_yaxes(title_text="Nifty Price", secondary_y=True, showgrid=False)
+            st.plotly_chart(apply_dark_layout(fig_iv_price), use_container_width=True, config=PLOT_CONFIG)
+            st.markdown('</div>', unsafe_allow_html=True)
+
         oi_col1, oi_col2 = st.columns(2)
         with oi_col1:
             st.markdown('<div class="chart-container"><div class="chart-title">OI Tracker (CE/PE Profile)</div>', unsafe_allow_html=True)
@@ -753,8 +776,8 @@ else:
         with oi_col2:
             st.markdown('<div class="chart-container"><div class="chart-title">OI Change Tracker (Full Day)</div>', unsafe_allow_html=True)
             fig_oichg_prof = go.Figure()
-            fig_oichg_prof.add_trace(go.Bar(x=df_filtered["Strike"], y=df_filtered["PE_OI_Chg_Calc"], name="Put OI Chg", marker_color="#FF5252"))
-            fig_oichg_prof.add_trace(go.Bar(x=df_filtered["Strike"], y=df_filtered["CE_OI_Chg_Calc"], name="Call OI Chg", marker_color="#00E676"))
+            fig_oichg_prof.add_trace(go.Bar(x=df_filtered["Strike"], y=df_filtered["PE_OI_Chg"], name="Put OI Chg", marker_color="#FF5252"))
+            fig_oichg_prof.add_trace(go.Bar(x=df_filtered["Strike"], y=df_filtered["CE_OI_Chg"], name="Call OI Chg", marker_color="#00E676"))
             fig_oichg_prof.add_vline(x=spot_price, line_dash="solid", line_color="#FFD700")
             fig_oichg_prof.update_layout(barmode='group')
             st.plotly_chart(apply_dark_layout(fig_oichg_prof, 250, True, df_filtered, atm_strike), use_container_width=True, config=PLOT_CONFIG)
@@ -847,22 +870,6 @@ else:
             c2.markdown(f"<div style='color:#FF5252; font-weight:bold; margin-bottom:5px;'>PUT (PE) BUILDUP</div><table class='buildup-table'><tr><th class='center'>Strike</th><th>LTP Chg</th><th>OI Chg</th><th class='center'>Status</th></tr>{''.join(pe_rows)}</table>", unsafe_allow_html=True)
         else: st.info(f"Gathering historical data for {b_win} buildup analysis. Please wait.")
         st.markdown('</div>', unsafe_allow_html=True)
-
-        st.markdown('<div class="chart-container"><div class="chart-title">Forward Vol Term Structure (Active + 3 Expiries)</div>', unsafe_allow_html=True)
-        exp_list = [selected_expiry] + [x for x in valid_expiries if x != selected_expiry][:3]
-        df_vol_struct, df_surface = fetch_multi_expiry_vol_structure(spot_price, exp_list)
-        
-        if not df_vol_struct.empty and len(df_vol_struct) >= 2:
-            is_backwardation = df_vol_struct.iloc[0]["Mean_IV"] > df_vol_struct.iloc[-1]["Mean_IV"]
-            term_str = "🔴 <b>Live Structure: Backwardation</b> (Front IV > Far IV) — Near-term panic pricing in." if is_backwardation else "🟢 <b>Live Structure: Contango</b> (Front IV < Far IV) — Normal market decay."
-            st.markdown(f'<div class="interp-box">{term_str}</div>', unsafe_allow_html=True)
-            fig_fwd = go.Figure()
-            fig_fwd.add_trace(go.Scatter(x=df_vol_struct["Expiry"], y=df_vol_struct["Forward_Vol"], mode="lines+markers", name="Forward Vol", line=dict(color="#00E676", width=2.5)))
-            fig_fwd.add_trace(go.Scatter(x=df_vol_struct["Expiry"], y=df_vol_struct["Mean_IV"], mode="lines+markers", name="Mean IV", line=dict(color="#AB47BC", width=2.5, dash="dot")))
-            st.plotly_chart(apply_dark_layout(fig_fwd), use_container_width=True, config=PLOT_CONFIG)
-        else: st.info("Loading Term Structure Data... Bypassing Dhan Rate Limits (Takes ~10 seconds)")
-        st.markdown('</div>', unsafe_allow_html=True)
-
 
     with tab3: # GREEK EXPOSURES
         call_wall_dex = df_filtered.loc[df_filtered['Net_DEX'].idxmax()]['Strike'] if not df_filtered.empty else atm_strike
@@ -975,54 +982,55 @@ else:
     with tab5: # OPENBULL & FYERS SKEW
         f1, f2 = st.columns(2)
         with f1:
-            st.markdown('<div class="chart-container"><div class="chart-title">Fyers Multi-Day Macro Overlay (PCR vs Price vs Max Pain vs ATM IV)</div>', unsafe_allow_html=True)
+            st.markdown('<div class="chart-container"><div class="chart-title">Fyers Multi-Day Macro Overlay (PCR vs Price vs Max Pain)</div>', unsafe_allow_html=True)
             fig_macro = make_subplots(specs=[[{"secondary_y": True}]])
             if not pcr_df.empty:
                 fig_macro.add_trace(go.Scatter(x=pcr_df["Time"], y=pcr_df["PCR"], mode="lines", name="PCR", line=dict(color="#AB47BC", width=2)), secondary_y=False)
                 if not gex_df.empty:
                     fig_macro.add_trace(go.Scatter(x=gex_df["Time"], y=gex_df["Spot"], mode="lines", name="Nifty Price", line=dict(color="#FF5252", width=2)), secondary_y=True)
             fig_macro.update_yaxes(title_text="PCR", secondary_y=False, gridcolor="#2A2E39")
-            fig_macro.update_yaxes(title_text="Nifty Price / Max Pain", secondary_y=True, showgrid=False)
+            fig_macro.update_yaxes(title_text="Nifty Price", secondary_y=True, showgrid=False)
             st.plotly_chart(apply_dark_layout(fig_macro), use_container_width=True, config=PLOT_CONFIG)
             st.markdown('</div>', unsafe_allow_html=True)
 
         with f2:
-            st.markdown('<div class="chart-container"><div class="chart-title">Fyers ATM IV vs Nifty Spot Price</div>', unsafe_allow_html=True)
-            fig_iv_price = make_subplots(specs=[[{"secondary_y": True}]])
-            if not iv_hist.empty:
-                atm_hist = iv_hist[iv_hist["Strike"] == atm_strike]
-                if not atm_hist.empty:
-                    fig_iv_price.add_trace(go.Scatter(x=atm_hist["Time"], y=(atm_hist["CE_IV"]+atm_hist["PE_IV"])/2.0*100, mode="lines", name="ATM IV", line=dict(color="#AB47BC", width=2)), secondary_y=False)
-                    fig_iv_price.add_trace(go.Scatter(x=atm_hist["Time"], y=atm_hist["Spot"], mode="lines", name="Price", line=dict(color="#FF5252", width=2)), secondary_y=True)
-            fig_iv_price.update_yaxes(title_text="ATM IV (%)", secondary_y=False, gridcolor="#2A2E39")
-            fig_iv_price.update_yaxes(title_text="Nifty Price", secondary_y=True, showgrid=False)
-            st.plotly_chart(apply_dark_layout(fig_iv_price), use_container_width=True, config=PLOT_CONFIG)
+            st.markdown('<div class="chart-container"><div class="chart-title">Fyers Selected Strikes IV Overlay vs Price</div>', unsafe_allow_html=True)
+            selected_iv_strikes = st.multiselect("Select Strikes to Track IV:", options=df_filtered["Strike"].tolist(), default=[atm_strike-50, atm_strike, atm_strike+50], key="fyers_ms_iv")
+            fig_ms_iv = make_subplots(specs=[[{"secondary_y": True}]])
+            if not iv_hist.empty and selected_iv_strikes:
+                colors_list = ["#AB47BC", "#00E676", "#29B6F6", "#FFA726", "#FF5252"]
+                for idx_s, st_val in enumerate(selected_iv_strikes):
+                    st_h = iv_hist[iv_hist["Strike"] == st_val]
+                    if not st_h.empty:
+                        c_col = colors_list[idx_s % len(colors_list)]
+                        fig_ms_iv.add_trace(go.Scatter(x=st_h["Time"], y=(st_h["CE_IV"]+st_h["PE_IV"])/2.0*100, mode="lines", name=f"IV ({st_val})", line=dict(color=c_col, width=1.5)), secondary_y=False)
+                if not synth_df.empty:
+                    fig_ms_iv.add_trace(go.Scatter(x=synth_df["Time"], y=synth_df["Spot"], mode="lines", name="Nifty Price", line=dict(color="#29B6F6", width=2)), secondary_y=True)
+            fig_ms_iv.update_yaxes(title_text="Implied Volatility (%)", secondary_y=False, gridcolor="#2A2E39")
+            fig_ms_iv.update_yaxes(title_text="Nifty Price", secondary_y=True, showgrid=False)
+            st.plotly_chart(apply_dark_layout(fig_ms_iv, 300), use_container_width=True, config=PLOT_CONFIG)
             st.markdown('</div>', unsafe_allow_html=True)
 
-        st.markdown('<div class="chart-container"><div class="chart-title">Fyers Selected Strikes IV Overlay vs Price</div>', unsafe_allow_html=True)
-        selected_iv_strikes = st.multiselect("Select Strikes to Track IV:", options=df_filtered["Strike"].tolist(), default=[atm_strike-50, atm_strike, atm_strike+50], key="fyers_ms_iv")
-        fig_ms_iv = make_subplots(specs=[[{"secondary_y": True}]])
-        if not iv_hist.empty and selected_iv_strikes:
-            colors_list = ["#AB47BC", "#00E676", "#29B6F6", "#FFA726", "#FF5252"]
-            for idx_s, st_val in enumerate(selected_iv_strikes):
-                st_h = iv_hist[iv_hist["Strike"] == st_val]
-                if not st_h.empty:
-                    c_col = colors_list[idx_s % len(colors_list)]
-                    fig_ms_iv.add_trace(go.Scatter(x=st_h["Time"], y=(st_h["CE_IV"]+st_h["PE_IV"])/2.0*100, mode="lines", name=f"IV ({st_val})", line=dict(color=c_col, width=1.5)), secondary_y=False)
-            if not synth_df.empty:
-                fig_ms_iv.add_trace(go.Scatter(x=synth_df["Time"], y=synth_df["Spot"], mode="lines", name="Nifty Price", line=dict(color="#29B6F6", width=2)), secondary_y=True)
-        fig_ms_iv.update_yaxes(title_text="Implied Volatility (%)", secondary_y=False, gridcolor="#2A2E39")
-        fig_ms_iv.update_yaxes(title_text="Nifty Price", secondary_y=True, showgrid=False)
-        st.plotly_chart(apply_dark_layout(fig_ms_iv, 300), use_container_width=True, config=PLOT_CONFIG)
-        st.markdown('</div>', unsafe_allow_html=True)
-
-        st.markdown('<div class="chart-container"><div class="chart-title">OpenBull IV Smile (Volatility Skew Profile)</div>', unsafe_allow_html=True)
-        fig_smile = go.Figure()
-        fig_smile.add_trace(go.Scatter(x=df_filtered["Strike"], y=df_filtered["PE_IV"], mode="lines+markers", name="Put IV (PE)", line=dict(color="#FF5252", width=2)))
-        fig_smile.add_trace(go.Scatter(x=df_filtered["Strike"], y=df_filtered["CE_IV"], mode="lines+markers", name="Call IV (CE)", line=dict(color="#00E676", width=2)))
-        fig_smile.add_vline(x=spot_price, line_dash="solid", line_color="#FFD700")
-        st.plotly_chart(apply_dark_layout(fig_smile, 250, True, df_filtered, atm_strike), use_container_width=True, config=PLOT_CONFIG)
-        st.markdown('</div>', unsafe_allow_html=True)
+        v1, v2 = st.columns(2)
+        with v1:
+            st.markdown('<div class="chart-container"><div class="chart-title">OpenBull IV Smile (Volatility Skew Profile)</div>', unsafe_allow_html=True)
+            fig_smile = go.Figure()
+            fig_smile.add_trace(go.Scatter(x=df_filtered["Strike"], y=df_filtered["PE_IV"], mode="lines+markers", name="Put IV (PE)", line=dict(color="#FF5252", width=2)))
+            fig_smile.add_trace(go.Scatter(x=df_filtered["Strike"], y=df_filtered["CE_IV"], mode="lines+markers", name="Call IV (CE)", line=dict(color="#00E676", width=2)))
+            fig_smile.add_vline(x=spot_price, line_dash="solid", line_color="#FFD700")
+            st.plotly_chart(apply_dark_layout(fig_smile, 250, True, df_filtered, atm_strike), use_container_width=True, config=PLOT_CONFIG)
+            st.markdown('</div>', unsafe_allow_html=True)
+            
+        with v2:
+            st.markdown('<div class="chart-container"><div class="chart-title">OpenBull 3D Volatility Surface</div>', unsafe_allow_html=True)
+            st.markdown('<div class="interp-box">💡 <b>3D Vol Skew Surface:</b> Visualizes IV across Strike (X) and Days (Y). Peaks indicate localized options demand.</div>', unsafe_allow_html=True)
+            if not df_surface.empty:
+                pivot_surface = df_surface.pivot_table(index='Days', columns='Strike', values='IV', aggfunc='mean').ffill(axis=1).bfill(axis=1).fillna(0)
+                fig_surf = go.Figure(data=[go.Surface(z=pivot_surface.values, x=pivot_surface.columns.tolist(), y=pivot_surface.index.tolist(), colorscale='Viridis', showscale=False)])
+                fig_surf.update_layout(scene=dict(xaxis_title='Strike', yaxis_title='Days to Expiry', zaxis_title='Implied Vol'), template="plotly_dark", margin=dict(l=0,r=0,t=0,b=0), height=250)
+                st.plotly_chart(fig_surf, use_container_width=True, config=PLOT_CONFIG)
+            else: st.info("Loading Expiries for 3D Surface... (Requires 4 active chains)")
+            st.markdown('</div>', unsafe_allow_html=True)
 
     with tab6: # DATA GRID
         st.markdown('<div class="chart-container"><div class="chart-title">Institutional Options Chain Grid</div>', unsafe_allow_html=True)
