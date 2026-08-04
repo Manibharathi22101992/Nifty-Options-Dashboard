@@ -103,7 +103,6 @@ st.markdown(
 # 3. HELPER FUNCTIONS & CHART ENGINE
 # ---------------------------------------------------------
 def safe_float(val, default=0.0):
-    """Bulletproof string/null parser for API data."""
     try:
         if val is None or str(val).strip() == "": return default
         return float(val)
@@ -158,6 +157,7 @@ def send_telegram_alert(message: str):
 def process_camarilla_alerts(df_camarilla, is_market_live, today_date_str):
     if not is_market_live: return
     if "telegram_cooldowns" not in st.session_state: st.session_state["telegram_cooldowns"] = {}
+    
     for _, row in df_camarilla.iterrows():
         sym, w, ltp = row["Symbol"], row["Weight"], row["LTP"]
         if row["Dist_S3_%"] <= 0.15:
@@ -174,34 +174,59 @@ def process_camarilla_alerts(df_camarilla, is_market_live, today_date_str):
                 st.session_state["telegram_cooldowns"][key] = today_date_str
 
 # ---------------------------------------------------------
-# 4. MATHEMATICAL ENGINE & GREEKS
+# 4. MATHEMATICAL ENGINE & GREEKS (COMPLETELY REWRITTEN)
 # ---------------------------------------------------------
-def calculate_bs_greeks(S, K, T, sigma, r=RISK_FREE_RATE, q=NIFTY_DIVIDEND_YIELD):
-    """Underflow-safe scalar Greek engine."""
-    if T <= 1e-5 or sigma <= 1e-4 or S <= 0 or K <= 0: 
-        return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+def calculate_bs_greeks(S, K, T, iv_ce, iv_pe, r=RISK_FREE_RATE, q=NIFTY_DIVIDEND_YIELD):
+    """Accurate Dual-IV Greek engine generating exactly 13 explicit metrics."""
+    if T <= 1e-5 or S <= 0 or K <= 0: 
+        return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
     try:
-        d1 = (math.log(S / K) + (r - q + 0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
-        d2 = d1 - sigma * math.sqrt(T)
-        
-        pdf_d1 = (1.0 / math.sqrt(2 * math.pi)) * math.exp(max(-0.5 * d1 * d1, -300))
-        cdf_d1 = 0.5 * (1.0 + math.erf(d1 / math.sqrt(2.0)))
+        iv_ce = max(iv_ce, 1e-4)
+        iv_pe = max(iv_pe, 1e-4)
+
+        # Call calculations
+        d1_ce = (math.log(S / K) + (r - q + 0.5 * iv_ce**2) * T) / (iv_ce * math.sqrt(T))
+        d2_ce = d1_ce - iv_ce * math.sqrt(T)
+        pdf_ce = (1.0 / math.sqrt(2 * math.pi)) * math.exp(max(-0.5 * d1_ce * d1_ce, -300))
+        cdf_ce = 0.5 * (1.0 + math.erf(d1_ce / math.sqrt(2.0)))
+
+        # Put calculations
+        d1_pe = (math.log(S / K) + (r - q + 0.5 * iv_pe**2) * T) / (iv_pe * math.sqrt(T))
+        d2_pe = d1_pe - iv_pe * math.sqrt(T)
+        pdf_pe = (1.0 / math.sqrt(2 * math.pi)) * math.exp(max(-0.5 * d1_pe * d1_pe, -300))
+        cdf_pe = 0.5 * (1.0 + math.erf(d1_pe / math.sqrt(2.0)))
+
         exp_qT = math.exp(-q * T)
         
-        ce_delta = exp_qT * cdf_d1
-        pe_delta = exp_qT * (cdf_d1 - 1.0)
-        gamma = exp_qT * pdf_d1 / (S * sigma * math.sqrt(T))
-        vega = S * exp_qT * pdf_d1 * math.sqrt(T) / 100.0  
-        vanna = -exp_qT * pdf_d1 * d2 / sigma
-        ce_charm = q * exp_qT * cdf_d1 - exp_qT * pdf_d1 * (2 * (r - q) * T - d2 * sigma * math.sqrt(T)) / (2 * T * sigma * math.sqrt(T))
-        pe_charm = ce_charm - q * exp_qT
-        speed = -exp_qT * pdf_d1 / (S**2 * sigma * math.sqrt(T)) * (1.0 + d1 / (sigma * math.sqrt(T)))
-        vomma = vega * d1 * d2 / sigma
+        # 1-3. Deltas & Gamma
+        ce_delta = exp_qT * cdf_ce
+        pe_delta = exp_qT * (cdf_pe - 1.0)
+        gamma = exp_qT * pdf_ce / (S * iv_ce * math.sqrt(T))
+
+        # 4-5. Vega
+        ce_vega = S * exp_qT * pdf_ce * math.sqrt(T) / 100.0  
+        pe_vega = S * exp_qT * pdf_pe * math.sqrt(T) / 100.0
+
+        # 6-7. Vanna
+        ce_vanna = -exp_qT * pdf_ce * d2_ce / iv_ce
+        pe_vanna = -exp_qT * pdf_pe * d2_pe / iv_pe
+
+        # 8-9. Charm
+        ce_charm = q * exp_qT * cdf_ce - exp_qT * pdf_ce * (2 * (r - q) * T - d2_ce * iv_ce * math.sqrt(T)) / (2 * T * iv_ce * math.sqrt(T))
+        pe_charm = q * exp_qT * cdf_pe - exp_qT * pdf_pe * (2 * (r - q) * T - d2_pe * iv_pe * math.sqrt(T)) / (2 * T * iv_pe * math.sqrt(T)) - q * exp_qT
+
+        # 10-11. Speed
+        ce_speed = -exp_qT * pdf_ce / (S**2 * iv_ce * math.sqrt(T)) * (1.0 + d1_ce / (iv_ce * math.sqrt(T)))
+        pe_speed = -exp_qT * pdf_pe / (S**2 * iv_pe * math.sqrt(T)) * (1.0 + d1_pe / (iv_pe * math.sqrt(T)))
+
+        # 12-13. Vomma
+        ce_vomma = ce_vega * d1_ce * d2_ce / iv_ce
+        pe_vomma = pe_vega * d1_pe * d2_pe / iv_pe
         
-        return ce_delta, pe_delta, gamma, vega, vanna, ce_charm, pe_charm, speed, vomma
+        return ce_delta, pe_delta, gamma, ce_vega, pe_vega, ce_vanna, pe_vanna, ce_charm, pe_charm, ce_speed, pe_speed, ce_vomma, pe_vomma
     except Exception as e:
         log_error(f"Greek Calc Exception: {e}")
-        return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+        return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
 
 def calculate_forward_price(S, df: pd.DataFrame, T):
     if df.empty: return S
@@ -269,8 +294,9 @@ def fetch_gex_option_chain_raw(expiry_date):
             ce_ltp, pe_ltp = safe_float(ce.get("last_price")), safe_float(pe.get("last_price"))
             ce_iv, pe_iv = safe_float(ce.get("implied_volatility"))/100.0, safe_float(pe.get("implied_volatility"))/100.0
 
-            ce_delta, pe_delta, gamma, ce_vega, pe_vega, ce_vanna, pe_vanna, ce_charm, pe_charm, ce_speed, pe_speed, ce_vomma, pe_vomma = calculate_bs_greeks(spot_price, strike, T_years, max(ce_iv, 0.01), RISK_FREE_RATE, NIFTY_DIVIDEND_YIELD)
-            _, _, _, _, _, _, _, _, _, _, _, _, _ = calculate_bs_greeks(spot_price, strike, T_years, max(pe_iv, 0.01), RISK_FREE_RATE, NIFTY_DIVIDEND_YIELD) # Ensures independent IV execution
+            ce_delta, pe_delta, gamma, ce_vega, pe_vega, ce_vanna, pe_vanna, ce_charm, pe_charm, ce_speed, pe_speed, ce_vomma, pe_vomma = calculate_bs_greeks(
+                spot_price, strike, T_years, ce_iv, pe_iv, RISK_FREE_RATE, NIFTY_DIVIDEND_YIELD
+            )
 
             scalar = NIFTY_LOT_SIZE / 1e5
             ce_vex = ce_oi * ce_vanna * spot_price * 0.01 * scalar
@@ -566,14 +592,7 @@ if is_market_live:
         save_persisted_df(st.session_state["synth_history"], "synth_history")
 
 # Load Memory explicitly for UI graphs
-abs_df = st.session_state["absorption_history"]
-oi_snap = st.session_state["oi_snapshots"]
-iv_hist = st.session_state["iv_spread_history"]
-pcr_df = st.session_state["pcr_history"]
-gex_df = st.session_state["gex_history"]
-doi_df = st.session_state["delta_oi_history"]
-strad_df = st.session_state["straddle_history"]
-synth_df = st.session_state["synth_history"]
+abs_df, oi_snap, iv_hist, pcr_df, gex_df, doi_df, strad_df, synth_df = st.session_state["absorption_history"], st.session_state["oi_snapshots"], st.session_state["iv_spread_history"], st.session_state["pcr_history"], st.session_state["gex_history"], st.session_state["delta_oi_history"], st.session_state["straddle_history"], st.session_state["synth_history"]
 
 # PREMIUM HERO BANNER
 st.markdown(f'<div class="hero-banner"><div style="color:var(--text-muted); font-size:1.1rem; font-weight:800; letter-spacing:1px; margin-bottom:5px;">NIFTY SYNTHETIC FUTURE (TRUE FWD)</div><div style="color:var(--text-main); font-size:3.5rem; font-weight:900; letter-spacing:-1px; text-shadow: 0px 0px 10px rgba(255,255,255,0.1);">₹{synthetic_future:,.2f}</div><div style="color:var(--amber); font-size:1rem; font-weight:600; margin-top:5px;">Spot Market: ₹{spot_price:,.2f} &nbsp;&nbsp;|&nbsp;&nbsp; Interpolated Gamma Flip: {gamma_flip_strike:.1f}</div></div>', unsafe_allow_html=True)
