@@ -212,7 +212,7 @@ def get_nifty50_camarilla():
     if not YF_AVAILABLE: return pd.DataFrame()
     tickers = list(NIFTY_50_WEIGHTS.keys())
     try:
-        # Using unadjusted close guarantees pure price structure
+        # Using unadjusted close guarantees pure price structure directly mirroring TradingView
         data = yf.download(tickers, period="5d", interval="1d", group_by='ticker', auto_adjust=False, progress=False)
     except Exception:
         return pd.DataFrame(columns=["Symbol", "Weight", "LTP", "S3", "R3", "Dist_S3_%", "Dist_R3_%"])
@@ -290,7 +290,7 @@ def start_dhan_websocket(client_id, access_token):
 live_ws_data = start_dhan_websocket(CLIENT_ID, ACCESS_TOKEN)
 
 # ---------------------------------------------------------
-# 4. BLACK-SCHOLES GREEK ENGINE (Nifty 65 Precision)
+# 5. BLACK-SCHOLES GREEK ENGINE (Nifty 65 Precision)
 # ---------------------------------------------------------
 def calculate_bs_greeks(S, K, T, sigma, r=0.07):
     if T <= 1e-5 or sigma <= 1e-4 or S <= 0 or K <= 0: return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
@@ -303,7 +303,7 @@ def calculate_bs_greeks(S, K, T, sigma, r=0.07):
     except: return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
 
 # ---------------------------------------------------------
-# 5. DATA API ENGINE
+# 6. DATA API ENGINE
 # ---------------------------------------------------------
 def fetch_gex_option_chain_raw(expiry_date):
     url = "https://api.dhan.co/v2/optionchain"
@@ -433,7 +433,7 @@ def start_background_daemon(selected_expiry_daemon):
     return True
 
 # ---------------------------------------------------------
-# 6. SESSION & LIVE ENGINE INITIALIZATION
+# 7. SESSION & LIVE ENGINE INITIALIZATION
 # ---------------------------------------------------------
 st.sidebar.header("⚙️ Command Center")
 
@@ -459,7 +459,7 @@ for key, cols in [
     ("oi_snapshots", ["Date", "Timestamp", "Strike", "CE_OI", "PE_OI", "CE_LTP", "PE_LTP"]),
     ("iv_spread_history", ["Date", "Time", "Strike", "CE_IV", "PE_IV", "IV_Spread", "Spot"]),
     ("pcr_history", ["Date", "Timestamp_dt", "Time", "PCR", "Vol_PCR", "Delta_PCR_5m", "Delta_PCR_15m", "Total_CE_OI", "Total_PE_OI"]),
-    ("gex_history", ["Date", "Timestamp_dt", "Time", "Total_Net_GEX", "Z_GEX", "Flip_Strike", "Spot", "Max_Pain"]),
+    ("gex_history", ["Date", "Timestamp_dt", "Time", "Total_Net_GEX", "Z_GEX", "Flip_Strike", "Spot"]),
     ("synth_history", ["Date", "Time", "Spot", "Strike_M50", "Strike_ATM", "Strike_P50", "Synth_M50", "Synth_ATM", "Synth_P50", "PCP_Dev_Mean"]),
     ("delta_oi_history", ["Date", "Timestamp_dt", "Time", "Total_Net_Delta_OI", "Delta_OI_ROC_1m", "Total_Net_DEX", "DEX_Vel_5m"]),
     ("straddle_history", ["Date", "Time", "Elapsed_Mins", "Actual_Straddle", "Expected_Straddle", "Regime", "Straddle_VWAP"])
@@ -475,7 +475,7 @@ if st.sidebar.button("🗑️ Reset Session Cache"):
     st.cache_data.clear(); st.rerun()
 
 # ---------------------------------------------------------
-# 7. QUARANTINED UI RENDERING BLOCK (Prevents Live Crashes)
+# 8. QUARANTINED UI RENDERING BLOCK (Prevents Live Crashes)
 # ---------------------------------------------------------
 st.markdown(f"### PRINCE PAX DASHBOARD")
 st.markdown(f'<div class="status-badge {"status-live" if is_market_live else "status-closed"}">{"🟢 LIVE MARKET" if is_market_live else "🟠 MARKET CLOSED"} | Expiry: {selected_expiry} | IST: {now_time_str}</div>', unsafe_allow_html=True)
@@ -504,6 +504,16 @@ else:
         if (df_sorted.iloc[i-1]["Cum_Net_GEX"] < 0 and df_sorted.iloc[i]["Cum_Net_GEX"] >= 0) or (df_sorted.iloc[i-1]["Cum_Net_GEX"] > 0 and df_sorted.iloc[i]["Cum_Net_GEX"] <= 0):
             gamma_flip_strike = int((df_sorted.iloc[i-1]["Strike"] + df_sorted.iloc[i]["Strike"]) / 2.0)
             break
+
+    # Calculate max_pain_strike (Restored Calculation to fix NameError)
+    max_pain_strike = atm_strike
+    pain_records = [{"Strike": k, "Writer_Loss": (df_oc["CE_OI"] * (k - df_oc["Strike"]).clip(lower=0)).sum() + (df_oc["PE_OI"] * (df_oc["Strike"] - k).clip(lower=0)).sum()} for k in df_oc["Strike"] if atm_strike - 1500 <= k <= atm_strike + 1500]
+    if pain_records:
+        df_pain_temp = pd.DataFrame(pain_records)
+        max_pain_strike = df_pain_temp.loc[df_pain_temp["Writer_Loss"].idxmin()]["Strike"]
+
+    target_row = df_oc[df_oc["Strike"] == selected_target_strike]
+    target_iv_spread = (target_row["CE_IV"].values[0] if not target_row.empty else 0.0) - (target_row["PE_IV"].values[0] if not target_row.empty else 0.0)
 
     df_filtered = df_oc[(df_oc["Strike"] >= atm_strike - 550) & (df_oc["Strike"] <= atm_strike + 550)].copy()
 
@@ -586,8 +596,6 @@ else:
     strad_df = st.session_state["straddle_history"]
 
     intraday_rv, vrp = 0.0, 0.0
-    target_row = df_oc[df_oc["Strike"] == selected_target_strike]
-    target_iv_spread = (target_row["CE_IV"].values[0] if not target_row.empty else 0.0) - (target_row["PE_IV"].values[0] if not target_row.empty else 0.0)
     atm_iv = (target_row["CE_IV"].values[0] + target_row["PE_IV"].values[0]) / 2.0 * 100 if not target_row.empty else 0.0
     if not synth_df.empty and len(synth_df) > 5:
         log_returns = np.log(synth_df["Spot"].astype(float) / synth_df["Spot"].astype(float).shift(1)).dropna()
@@ -607,7 +615,7 @@ else:
     strad_reg = strad_df.iloc[-1]["Regime"] if not strad_df.empty else "NORMAL"
 
     n1, n2, n3, n4 = st.columns(4)
-    n1.markdown(f'<div class="metric-card metric-card-amber"><div class="metric-title">NIFTY SYNTH FUT (ATM)</div><div class="metric-value">₹{synthetic_future:,.2f}</div><div class="metric-sub sub-amber">Spot: ₹{spot_price:,.2f} | Flip: {gamma_flip_strike}</div></div>', unsafe_allow_html=True)
+    n1.markdown(f'<div class="metric-card metric-card-amber"><div class="metric-title">NIFTY SYNTH FUT (ATM)</div><div class="metric-value">₹{synthetic_future:,.2f}</div><div class="metric-sub sub-amber">Spot: ₹{spot_price:,.2f} | Pain: {max_pain_strike}</div></div>', unsafe_allow_html=True)
     n2.markdown(f'<div class="metric-card {"metric-card-green" if target_iv_spread >= 0 else "metric-card-red"}"><div class="metric-title">{selected_target_strike} IV SPREAD</div><div class="metric-value">{target_iv_spread:+.2f}%</div><div class="metric-sub {"sub-green" if target_iv_spread >= 0 else "sub-red"}">CE {(target_row["CE_IV"].values[0]*100) if not target_row.empty else 0:.1f}% | PE {(target_row["PE_IV"].values[0]*100) if not target_row.empty else 0:.1f}%</div></div>', unsafe_allow_html=True)
     dp_15m = pcr_df.iloc[-1]["Delta_PCR_15m"] if not pcr_df.empty else 0.0
     n3.markdown(f'<div class="metric-card {"metric-card-green" if dp_15m >= 0.15 else ("metric-card-red" if dp_15m <= -0.15 else "metric-card-amber")}"><div class="metric-title">ΔPCR 15M VELOCITY</div><div class="metric-value">{dp_15m:+.2f}</div><div class="metric-sub {"sub-green" if dp_15m >= 0.15 else ("sub-red" if dp_15m <= -0.15 else "sub-amber")}">PCR: {pcr_df.iloc[-1]["PCR"] if not pcr_df.empty else 0:.2f}</div></div>', unsafe_allow_html=True)
@@ -665,7 +673,7 @@ else:
     h5.plotly_chart(create_h_bar("Vega Exp (VEX)", tot_pe_vex, tot_ce_vex, vex_interp, vex_col), use_container_width=True)
     h6.plotly_chart(create_h_bar("Gamma Exp (GEX)", tot_put_gex, tot_call_gex, gex_interp, gex_col), use_container_width=True)
 
-    # 8C. TABBED INTERFACE (EXACTLY 7 TABS)
+    # 8C. TABBED INTERFACE
     tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
         "🚀 Intraday Flow Center", 
         "👑 Prince Analysis",
@@ -855,7 +863,6 @@ else:
         else: st.info("Loading Term Structure Data... Bypassing Dhan Rate Limits (Takes ~10 seconds)")
         st.markdown('</div>', unsafe_allow_html=True)
 
-
     with tab3: # GREEK EXPOSURES
         call_wall_dex = df_filtered.loc[df_filtered['Net_DEX'].idxmax()]['Strike'] if not df_filtered.empty else atm_strike
         put_wall_dex = df_filtered.loc[df_filtered['Net_DEX'].idxmin()]['Strike'] if not df_filtered.empty else atm_strike
@@ -892,7 +899,7 @@ else:
             fig_gex.add_vline(x=gamma_flip_strike, line_dash="dash", line_color="#29B6F6"); fig_gex.add_annotation(x=gamma_flip_strike, y=y_max_gex*0.85, text=f"Flip: {gamma_flip_strike}", showarrow=False, font=dict(color="#29B6F6", size=9))
             fig_gex.add_vline(x=max_pain_strike, line_dash="dash", line_color="#FFD700"); fig_gex.add_annotation(x=max_pain_strike, y=y_max_gex*0.75, text=f"Max Pain: {max_pain_strike}", showarrow=False, font=dict(color="#FFD700", size=9))
             fig_gex.add_vline(x=call_wall_gex, line_dash="dash", line_color="#00E676"); fig_gex.add_annotation(x=call_wall_gex, y=y_max_gex*0.65, text=f"Call Wall: {call_wall_gex}", showarrow=False, font=dict(color="#00E676", size=9))
-            fig_gex.add_vline(x=put_wall_gex, line_dash="dash", line_color="#FF5252"); fig_gex.add_annotation(x=put_wall_gex, y=y_max_gex*0.55, text=f"Put Wall: {put_wall_gex}", showarrow=False, font=dict(color="#FF5252", size=9))
+            fig_gex.add_vline(x=rput_wall_gex, line_dash="dash", line_color="#FF5252"); fig_gex.add_annotation(x=rput_wall_gex, y=y_max_gex*0.55, text=f"Put Wall: {rput_wall_gex}", showarrow=False, font=dict(color="#FF5252", size=9))
             st.plotly_chart(apply_dark_layout(fig_gex, 350, True, df_filtered, atm_strike), use_container_width=True, config=PLOT_CONFIG)
             st.markdown('</div>', unsafe_allow_html=True)
 
@@ -1026,16 +1033,6 @@ else:
         fig_smile.add_trace(go.Scatter(x=df_filtered["Strike"], y=df_filtered["CE_IV"], mode="lines+markers", name="Call IV (CE)", line=dict(color="#00E676", width=2)))
         fig_smile.add_vline(x=spot_price, line_dash="solid", line_color="#FFD700")
         st.plotly_chart(apply_dark_layout(fig_smile, 250, True, df_filtered, atm_strike), use_container_width=True, config=PLOT_CONFIG)
-        st.markdown('</div>', unsafe_allow_html=True)
-        
-        st.markdown('<div class="chart-container"><div class="chart-title">OpenBull 3D Volatility Surface</div>', unsafe_allow_html=True)
-        st.markdown('<div class="interp-box">💡 <b>3D Vol Skew Surface:</b> Visualizes IV across Strike (X) and Days (Y). Peaks indicate localized options demand.</div>', unsafe_allow_html=True)
-        if not df_surface.empty:
-            pivot_surface = df_surface.pivot_table(index='Days', columns='Strike', values='IV', aggfunc='mean').ffill(axis=1).bfill(axis=1).fillna(0)
-            fig_surf = go.Figure(data=[go.Surface(z=pivot_surface.values, x=pivot_surface.columns.tolist(), y=pivot_surface.index.tolist(), colorscale='Viridis', showscale=False)])
-            fig_surf.update_layout(scene=dict(xaxis_title='Strike', yaxis_title='Days to Expiry', zaxis_title='Implied Vol'), template="plotly_dark", margin=dict(l=0,r=0,t=0,b=0), height=250)
-            st.plotly_chart(fig_surf, use_container_width=True, config=PLOT_CONFIG)
-        else: st.info("Loading Expiries for 3D Surface... (Requires 4 active chains)")
         st.markdown('</div>', unsafe_allow_html=True)
 
     with tab6: # DATA GRID
