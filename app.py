@@ -141,6 +141,30 @@ def apply_dark_layout(fig, height=250, is_strike_axis=False, df_filtered=None, a
     fig.update_yaxes(gridcolor="#2A2E39", zerolinecolor="#2A2E39", tickfont=dict(size=10))
     return fig
 
+def create_h_bar(title, put_val, call_val, interp_text="", interp_color="#8A93A6"):
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=[put_val], y=[''], name='Put (PE)', orientation='h', marker_color="#FF5252", text=f"{put_val:,.0f}", textposition='inside', insidetextanchor='end'))
+    fig.add_trace(go.Bar(x=[call_val], y=[''], name='Call (CE)', orientation='h', marker_color="#00E676", text=f"{call_val:,.0f}", textposition='inside', insidetextanchor='start'))
+    fig.update_layout(
+        title=dict(text=f"<b>{title}</b><br><span style='color:{interp_color}; font-size:10px; font-weight:700;'>{interp_text}</span>", font=dict(size=11, color="#8A93A6"), x=0.5, xanchor='center'),
+        barmode='group', margin=dict(l=0, r=0, t=35, b=0), height=85, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", showlegend=False, xaxis=dict(visible=False), yaxis=dict(visible=False), bargap=0.2
+    )
+    return fig
+
+def get_oi_build_status(dl_p, dl_oi, is_call):
+    if is_call:
+        if dl_p > 0 and dl_oi > 0: return "Long Buildup", "rgba(0, 230, 118, 0.15)", "#00E676", 1
+        elif dl_p < 0 and dl_oi > 0: return "Short Buildup", "rgba(255, 82, 82, 0.15)", "#FF5252", -1
+        elif dl_p > 0 and dl_oi < 0: return "Short Cover", "rgba(0, 230, 118, 0.15)", "#00E676", 1
+        elif dl_p < 0 and dl_oi < 0: return "Long Unwind", "rgba(255, 82, 82, 0.15)", "#FF5252", -1
+        else: return "Neutral", "rgba(138, 147, 166, 0.15)", "#8A93A6", 0
+    else:
+        if dl_p > 0 and dl_oi > 0: return "Long Buildup", "rgba(255, 82, 82, 0.15)", "#FF5252", -1
+        elif dl_p < 0 and dl_oi > 0: return "Short Buildup", "rgba(0, 230, 118, 0.15)", "#00E676", 1
+        elif dl_p > 0 and dl_oi < 0: return "Short Cover", "rgba(255, 82, 82, 0.15)", "#FF5252", -1
+        elif dl_p < 0 and dl_oi < 0: return "Long Unwind", "rgba(0, 230, 118, 0.15)", "#00E676", 1
+        else: return "Neutral", "rgba(138, 147, 166, 0.15)", "#8A93A6", 0
+
 # ---------------------------------------------------------
 # 3. GREEK ENGINE (Corrected for Dividends & Accurate Formulas)
 # ---------------------------------------------------------
@@ -160,7 +184,7 @@ def calculate_bs_greeks(S, K, T, sigma, r=0.07, q=NIFTY_DIVIDEND_YIELD):
         pe_delta = exp_qT * (cdf_d1 - 1.0)
         
         gamma = exp_qT * pdf_d1 / (S * sigma * math.sqrt(T))
-        vega = S * exp_qT * pdf_d1 * math.sqrt(T) / 100.0  # Divided by 100 for 1% IV move
+        vega = S * exp_qT * pdf_d1 * math.sqrt(T) / 100.0  
         
         vanna = -exp_qT * pdf_d1 * d2 / sigma
         
@@ -295,7 +319,26 @@ def fetch_multi_expiry_vol_structure(spot_price, valid_exp_list):
         df_vol["Forward_Vol"] = fwd_vols
     return df_vol, df_surf
 
-# SINGLETON BACKGROUND DAEMON (Never duplicates)
+def get_persisted_df(name, cols):
+    if os.path.exists(f"{name}.csv"):
+        try:
+            df = pd.read_csv(f"{name}.csv")
+            if set(cols).issubset(df.columns): return df
+        except: pass
+    return pd.DataFrame(columns=cols)
+
+def save_persisted_df(df, name):
+    try: df.to_csv(f"{name}.csv", index=False)
+    except: pass
+
+def check_and_reset(df_name, cols, today_date_str, now_time_str):
+    df = get_persisted_df(df_name, cols)
+    if not df.empty and str(df.iloc[-1]["Date"]) != today_date_str and now_time_str >= "09:15:00":
+        df = pd.DataFrame(columns=cols)
+        save_persisted_df(df, df_name)
+    return df
+
+# SINGLETON BACKGROUND DAEMON
 @st.cache_resource
 def start_background_daemon():
     def daemon_loop():
@@ -313,7 +356,6 @@ def start_background_daemon():
                             now_ts = int(time.time())
                             today_str = now_ist.strftime("%Y-%m-%d")
                             
-                            # Inverse-Distance Weighted Synthetic Future (Rock Solid)
                             diffs = (df_oc['Strike'] - spot_pr).abs()
                             closest_idx = diffs.nsmallest(3).index
                             s_sum, w_sum = 0, 0
@@ -360,7 +402,6 @@ except Exception as e:
 
 selected_expiry = st.sidebar.selectbox("Primary Expiry", valid_expiries) if valid_expiries else st.sidebar.date_input("Primary Expiry").strftime("%Y-%m-%d")
 
-# Feed expiry into the background daemon safety net
 GLOBAL_STATE["selected_expiry"] = selected_expiry
 start_background_daemon()
 
@@ -371,14 +412,12 @@ for key, cols in [
     ("oi_snapshots", ["Date", "Timestamp", "Strike", "CE_OI", "PE_OI", "CE_LTP", "PE_LTP"]),
     ("iv_spread_history", ["Date", "Time", "Strike", "CE_IV", "PE_IV", "IV_Spread", "Spot"]),
     ("pcr_history", ["Date", "Timestamp_dt", "Time", "PCR", "Vol_PCR", "Delta_PCR_5m", "Delta_PCR_15m", "Total_CE_OI", "Total_PE_OI"]),
-    ("gex_history", ["Date", "Timestamp_dt", "Time", "Total_Net_GEX", "Z_GEX", "Flip_Strike", "Spot"]),
-    ("synth_history", ["Date", "Time", "Spot", "Strike_M50", "Strike_ATM", "Strike_P50", "Synth_M50", "Synth_ATM", "Synth_P50", "PCP_Dev_Mean"]),
-    ("delta_oi_history", ["Date", "Timestamp_dt", "Time", "Total_Net_Delta_OI", "Delta_OI_ROC_1m", "Total_Net_DEX", "DEX_Vel_5m"])
+    ("synth_history", ["Date", "Time", "Spot", "Strike_M50", "Strike_ATM", "Strike_P50", "Synth_M50", "Synth_ATM", "Synth_P50", "PCP_Dev_Mean"])
 ]:
     if key not in st.session_state: st.session_state[key] = check_and_reset(key, cols, today_date_str, now_time_str)
 
 if st.sidebar.button("🗑️ Reset Session Cache"):
-    for key in ["absorption_history", "oi_snapshots", "iv_spread_history", "pcr_history", "gex_history", "synth_history", "delta_oi_history"]:
+    for key in ["absorption_history", "oi_snapshots", "iv_spread_history", "pcr_history", "synth_history"]:
         st.session_state[key] = pd.DataFrame(columns=st.session_state[key].columns)
     st.cache_data.clear(); st.rerun()
 
@@ -407,7 +446,6 @@ elif df_oc is None or df_oc.empty:
 # ---------------------------------------------------------
 # 7. CORE DATA COMPILATION
 # ---------------------------------------------------------
-# Hardened Synthetic Anchor
 diffs = (df_oc['Strike'] - spot_price).abs()
 closest_idx = diffs.nsmallest(3).index
 s_sum, w_sum = 0, 0
@@ -422,7 +460,6 @@ atm_strike = int(round(synthetic_future / 50) * 50)
 strike_m50, strike_p50 = atm_strike - 50, atm_strike + 50
 selected_target_strike = st.sidebar.selectbox("🎯 Target Strike", df_oc["Strike"].tolist(), index=df_oc["Strike"].tolist().index(atm_strike) if atm_strike in df_oc["Strike"].tolist() else 0)
 
-# Linear Interpolated Gamma Flip
 df_sorted = df_oc.sort_values("Strike").copy()
 df_sorted["Cum_Net_GEX"] = df_sorted["Net_GEX"].cumsum()
 gamma_flip_strike = float(spot_price)
@@ -440,7 +477,6 @@ total_ce_oi_sum = df_oc["CE_OI"].sum()
 total_pe_oi_sum = df_oc["PE_OI"].sum()
 now_ts = int(time.time())
 
-# UI Memory Injection
 if is_market_live:
     abs_df = st.session_state["absorption_history"]
     if abs_df.empty or (now_ts - abs_df["Timestamp"].max() >= 60):
@@ -469,12 +505,6 @@ if is_market_live:
         st.session_state["pcr_history"] = pd.concat([pcr_df, pd.DataFrame([{"Date": today_date_str, "Timestamp_dt": now_ist, "Time": now_time_str, "PCR": current_pcr, "Vol_PCR": vol_pcr, "Delta_PCR_5m": 0.0, "Delta_PCR_15m": dp_15m, "Total_CE_OI": total_ce_oi_sum, "Total_PE_OI": total_pe_oi_sum}])], ignore_index=True)
         save_persisted_df(st.session_state["pcr_history"], "pcr_history")
 
-    gex_df = st.session_state["gex_history"]
-    if gex_df.empty or str(gex_df.iloc[-1]["Time"]) != now_time_str:
-        z_gex = (df_oc["Net_GEX"].sum() - gex_df["Total_Net_GEX"].tail(20).mean()) / max(gex_df["Total_Net_GEX"].tail(20).std(), 1e-6) if len(gex_df) >= 2 else 0.0
-        st.session_state["gex_history"] = pd.concat([gex_df, pd.DataFrame([{"Date": today_date_str, "Timestamp_dt": now_ist, "Time": now_time_str, "Total_Net_GEX": df_oc["Net_GEX"].sum(), "Z_GEX": z_gex, "Flip_Strike": gamma_flip_strike, "Spot": spot_price}])], ignore_index=True)
-        save_persisted_df(st.session_state["gex_history"], "gex_history")
-
     synth_df = st.session_state["synth_history"]
     if synth_df.empty or str(synth_df.iloc[-1]["Time"]) != now_time_str:
         r_m50, r_atm, r_p50 = df_oc[df_oc["Strike"] == strike_m50], df_oc[df_oc["Strike"] == atm_strike], df_oc[df_oc["Strike"] == strike_p50]
@@ -484,20 +514,11 @@ if is_market_live:
         st.session_state["synth_history"] = pd.concat([synth_df, pd.DataFrame([{"Date": today_date_str, "Time": now_time_str, "Spot": spot_price, "Strike_M50": strike_m50, "Strike_ATM": atm_strike, "Strike_P50": strike_p50, "Synth_M50": s_m50, "Synth_ATM": s_atm, "Synth_P50": s_p50, "PCP_Dev_Mean": ((s_m50 - spot_price) + (s_atm - spot_price) + (s_p50 - spot_price)) / 3.0}])], ignore_index=True)
         save_persisted_df(st.session_state["synth_history"], "synth_history")
 
-    doi_df = st.session_state["delta_oi_history"]
-    if doi_df.empty or str(doi_df.iloc[-1]["Time"]) != now_time_str:
-        d_roc_1m = df_oc["Net_Delta_OI"].sum() - doi_df[doi_df["Timestamp_dt"] <= now_ist - datetime.timedelta(minutes=1)].iloc[-1]["Total_Net_Delta_OI"] if not doi_df[doi_df["Timestamp_dt"] <= now_ist - datetime.timedelta(minutes=1)].empty else 0.0
-        dex_vel = (df_oc["Net_DEX"].sum()) - doi_df[doi_df["Timestamp_dt"] <= now_ist - datetime.timedelta(minutes=5)].iloc[-1]["Total_Net_DEX"] if not doi_df[doi_df["Timestamp_dt"] <= now_ist - datetime.timedelta(minutes=5)].empty else 0.0
-        st.session_state["delta_oi_history"] = pd.concat([doi_df, pd.DataFrame([{"Date": today_date_str, "Timestamp_dt": now_ist, "Time": now_time_str, "Total_Net_Delta_OI": df_oc["Net_Delta_OI"].sum(), "Delta_OI_ROC_1m": d_roc_1m, "Total_Net_DEX": df_oc["Net_DEX"].sum(), "DEX_Vel_5m": dex_vel}])], ignore_index=True)
-        save_persisted_df(st.session_state["delta_oi_history"], "delta_oi_history")
-
 abs_df = st.session_state["absorption_history"]
 oi_snap = st.session_state["oi_snapshots"]
 iv_hist = st.session_state["iv_spread_history"]
 pcr_df = st.session_state["pcr_history"]
-gex_df = st.session_state["gex_history"]
 synth_df = st.session_state["synth_history"]
-doi_df = st.session_state["delta_oi_history"]
 
 # PREMIUM HERO BANNER
 st.markdown(f'<div class="hero-banner"><div style="color:var(--text-muted); font-size:1.1rem; font-weight:800; letter-spacing:1px; margin-bottom:5px;">NIFTY SYNTHETIC FUTURE (IV WEIGHTED)</div><div style="color:var(--text-main); font-size:3.5rem; font-weight:900; letter-spacing:-1px; text-shadow: 0px 0px 10px rgba(255,255,255,0.1);">₹{synthetic_future:,.2f}</div><div style="color:var(--amber); font-size:1rem; font-weight:600; margin-top:5px;">Spot Market: ₹{spot_price:,.2f} &nbsp;&nbsp;|&nbsp;&nbsp; Interpolated Gamma Flip: {gamma_flip_strike:.1f}</div></div>', unsafe_allow_html=True)
@@ -510,12 +531,10 @@ tot_pe_oi, tot_ce_oi = df_filtered["PE_OI"].sum(), df_filtered["CE_OI"].sum()
 oi_interp = "🟢 Uptrend / Strong Support" if tot_pe_oi > tot_ce_oi * 1.15 else ("🔴 Downtrend / Resistance" if tot_ce_oi > tot_pe_oi * 1.15 else "⚪ Balanced Structure")
 oi_col = "#00E676" if "Uptrend" in oi_interp else ("#FF5252" if "Downtrend" in oi_interp else "#8A93A6")
 
-# True Full Day OI Change using robust Snapshot Difference from memory
 today_snaps = oi_snap[oi_snap["Date"] == today_date_str]
 if not today_snaps.empty:
     first_ts = today_snaps["Timestamp"].min()
     first_snap = today_snaps[today_snaps["Timestamp"] == first_ts]
-    # Map the very first snapshot of the day to compute precise absolute change
     df_filtered["CE_OI_Chg_Calc"] = df_filtered["CE_OI"] - df_filtered["Strike"].map(first_snap.set_index("Strike")["CE_OI"]).fillna(df_filtered["CE_OI"])
     df_filtered["PE_OI_Chg_Calc"] = df_filtered["PE_OI"] - df_filtered["Strike"].map(first_snap.set_index("Strike")["PE_OI"]).fillna(df_filtered["PE_OI"])
     tot_ce_oichg, tot_pe_oichg = df_filtered["CE_OI_Chg_Calc"].sum(), df_filtered["PE_OI_Chg_Calc"].sum()
@@ -552,21 +571,19 @@ h6.plotly_chart(create_h_bar("Gamma Exp (GEX)", tot_put_gex, tot_call_gex, gex_i
 # ---------------------------------------------------------
 # 9. MASTER TAB INTERFACE
 # ---------------------------------------------------------
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "👑 Prince Analysis",
     "🛡️ Greek Exposure Profiles", 
     "🚀 Intraday & Advanced Analytics", 
     "📈 OpenBull & Fyers Skew", 
     "📊 Options Chain Grid",
-    "🎯 Nifty 50 Camarilla Radar",
-    "⚠️ System Health & Logs"
+    "🎯 Nifty 50 Camarilla Radar"
 ])
 
 with tab1: # PRINCE ANALYSIS
     v1, v2 = st.columns(2)
     with v1:
         st.markdown('<div class="chart-container"><div class="chart-title">Forward Vol Term Structure (Active + 3 Expiries)</div>', unsafe_allow_html=True)
-        # Guarantees the selected expiry is parsed as first element
         exp_list = [selected_expiry] + [x for x in valid_expiries if x != selected_expiry][:3]
         df_vol_struct, df_surface = fetch_multi_expiry_vol_structure(spot_price, exp_list)
         
@@ -816,29 +833,6 @@ with tab3: # INTRADAY & ADVANCED ANALYTICS (MERGED)
 
     a1, a2 = st.columns(2)
     with a1:
-        st.markdown('<div class="chart-container"><div class="chart-title">Fyers ATM Straddle LTP vs Price vs Straddle VWAP</div>', unsafe_allow_html=True)
-        fig_fyers_strad = make_subplots(specs=[[{"secondary_y": True}]])
-        if not strad_df.empty:
-            fig_fyers_strad.add_trace(go.Scatter(x=strad_df["Time"], y=strad_df["Actual_Straddle"], mode="lines", name="ATM Straddle LTP", line=dict(color="#FF5252", width=2)), secondary_y=False)
-            if "Straddle_VWAP" in strad_df.columns:
-                fig_fyers_strad.add_trace(go.Scatter(x=strad_df["Time"], y=strad_df["Straddle_VWAP"], mode="lines", name="Straddle VWAP", line=dict(color="#00E676", width=1.5, dash="dot")), secondary_y=False)
-            if not synth_df.empty:
-                fig_fyers_strad.add_trace(go.Scatter(x=synth_df["Time"], y=synth_df["Spot"], mode="lines", name="Nifty Price", line=dict(color="#29B6F6", width=1.5, dash="dash")), secondary_y=True)
-        fig_fyers_strad.update_yaxes(title_text="Straddle Premium (₹)", secondary_y=False, gridcolor="#2A2E39")
-        fig_fyers_strad.update_yaxes(title_text="Nifty Price", secondary_y=True, showgrid=False)
-        st.plotly_chart(apply_dark_layout(fig_fyers_strad), use_container_width=True, config=PLOT_CONFIG)
-        st.markdown('</div>', unsafe_allow_html=True)
-    with a2:
-        st.markdown('<div class="chart-container"><div class="chart-title">Gamma Flip Migration (ΔFlip)</div>', unsafe_allow_html=True)
-        fig_flip = go.Figure()
-        if not gex_df.empty:
-            fig_flip.add_trace(go.Scatter(x=gex_df["Time"], y=gex_df["Spot"], mode="lines", name="Spot", line=dict(color="#FFD700", width=2)))
-            fig_flip.add_trace(go.Scatter(x=gex_df["Time"], y=gex_df["Flip_Strike"], mode="lines", name="Flip Level", line=dict(color="#29B6F6", width=2, dash="dash")))
-        st.plotly_chart(apply_dark_layout(fig_flip), use_container_width=True, config=PLOT_CONFIG)
-        st.markdown('</div>', unsafe_allow_html=True)
-
-    a3, a4 = st.columns(2)
-    with a3:
         st.markdown('<div class="chart-container"><div class="chart-title">Put-Call Parity Discrepancy Index (PCP_Dev)</div>', unsafe_allow_html=True)
         fig_pcp = go.Figure()
         if not synth_df.empty:
@@ -847,7 +841,7 @@ with tab3: # INTRADAY & ADVANCED ANALYTICS (MERGED)
         fig_pcp.add_hline(y=-3.0, line_dash="dash", line_color="#FF5252", annotation_text="-3.0 Put Squeeze")
         st.plotly_chart(apply_dark_layout(fig_pcp), use_container_width=True, config=PLOT_CONFIG)
         st.markdown('</div>', unsafe_allow_html=True)
-    with a4:
+    with a2:
         st.markdown('<div class="chart-container"><div class="chart-title">Multi-Strike Synthetic Parity Engine</div>', unsafe_allow_html=True)
         fig_synth = go.Figure()
         if not synth_df.empty:
@@ -939,13 +933,4 @@ with tab6: # NIFTY 50 CAMARILLA RADAR
             else: st.info("No Nifty 50 constituents currently testing R3 Resistance.")
     else:
         st.warning("Fetching Nifty 50 OHLC data. Please wait...")
-    st.markdown('</div>', unsafe_allow_html=True)
-
-with tab7: # ERROR LOGS & DIAGNOSTICS
-    st.markdown('<div class="chart-container"><div class="chart-title">Background Diagnostic Logs</div>', unsafe_allow_html=True)
-    if len(GLOBAL_STATE["errors"]) == 0:
-        st.success("✅ System Health is Optimal. 0 Critical Exceptions recorded in session.")
-    else:
-        for err in GLOBAL_STATE["errors"]:
-            st.markdown(f"<div style='color:var(--red); font-family:monospace; padding:5px; border-bottom:1px solid #2A2E39;'>{err}</div>", unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
