@@ -115,7 +115,7 @@ if not CLIENT_ID or not ACCESS_TOKEN:
     st.error("⚠️ API credentials missing. Please update your Streamlit Secrets.")
     st.stop()
 
-# UPGRADED LOT SIZE TO 65 AS REQUESTED
+# LOT SIZE UPDATED TO 65
 NIFTY_LOT_SIZE = 65
 
 NIFTY_50_WEIGHTS = {
@@ -131,7 +131,6 @@ NIFTY_50_WEIGHTS = {
     "LTIM.NS": 0.4, "HDFCLIFE.NS": 0.4, "TATACONSUM.NS": 0.4, "UPL.NS": 0.3, "SHREECEM.NS": 0.3
 }
 
-# Plotly config optimized for Mobile Scrolling (Touch Drag = Scroll Page, Box Select = Zoom)
 PLOT_CONFIG = {'displayModeBar': True, 'scrollZoom': False}
 
 # ---------------------------------------------------------
@@ -206,14 +205,13 @@ def process_camarilla_alerts(df_camarilla, is_market_live, today_date_str):
                 st.session_state["telegram_cooldowns"][key] = today_date_str
 
 # ---------------------------------------------------------
-# 4. YFINANCE, WEBSOCKET & BACKGROUND DAEMON
+# 4. YFINANCE & MEMORY ENGINES (Now Using CSV for 100% Reliability)
 # ---------------------------------------------------------
 @st.cache_data(ttl=60)
 def get_nifty50_camarilla():
     if not YF_AVAILABLE: return pd.DataFrame()
     tickers = list(NIFTY_50_WEIGHTS.keys())
     try:
-        # Pull 5 days of data to guarantee at least 2 valid historical days even during long weekends
         data = yf.download(tickers, period="5d", interval="1d", group_by='ticker', auto_adjust=True, progress=False)
     except Exception:
         return pd.DataFrame(columns=["Symbol", "Weight", "LTP", "S3", "R3", "Dist_S3_%", "Dist_R3_%"])
@@ -221,11 +219,7 @@ def get_nifty50_camarilla():
     records = []
     for ticker in tickers:
         try:
-            if isinstance(data.columns, pd.MultiIndex):
-                df_t = data[ticker].dropna()
-            else:
-                df_t = data.dropna()
-
+            df_t = data[ticker].dropna() if isinstance(data.columns, pd.MultiIndex) else data.dropna()
             if len(df_t) >= 2:
                 prev_h, prev_l, prev_c = df_t.iloc[-2]['High'], df_t.iloc[-2]['Low'], df_t.iloc[-2]['Close']
                 ltp = df_t.iloc[-1]['Close']
@@ -244,21 +238,22 @@ def get_nifty50_camarilla():
         return df_cam.sort_values("Weight", ascending=False)
     return pd.DataFrame(columns=["Symbol", "Weight", "LTP", "S3", "R3", "Dist_S3_%", "Dist_R3_%"])
 
+# BULLETPROOF CSV CACHING
 def get_persisted_df(name, cols):
-    if os.path.exists(f"{name}.parquet"):
+    if os.path.exists(f"{name}.csv"):
         try:
-            df = pd.read_parquet(f"{name}.parquet")
+            df = pd.read_csv(f"{name}.csv")
             if set(cols).issubset(df.columns): return df
         except: pass
     return pd.DataFrame(columns=cols)
 
 def save_persisted_df(df, name):
-    try: df.to_parquet(f"{name}.parquet", engine="pyarrow")
+    try: df.to_csv(f"{name}.csv", index=False)
     except: pass
 
 def check_and_reset(df_name, cols, today_date_str, now_time_str):
     df = get_persisted_df(df_name, cols)
-    if not df.empty and df.iloc[-1]["Date"] != today_date_str and now_time_str >= "09:15:00":
+    if not df.empty and str(df.iloc[-1]["Date"]) != today_date_str and now_time_str >= "09:15:00":
         df = pd.DataFrame(columns=cols)
         save_persisted_df(df, df_name)
     return df
@@ -293,40 +288,6 @@ def start_dhan_websocket(client_id, access_token):
     return ws_data
 
 live_ws_data = start_dhan_websocket(CLIENT_ID, ACCESS_TOKEN)
-
-# BACKGROUND DAEMON: Collects Data Even If Browser Is Closed
-@st.cache_resource
-def start_background_daemon(selected_expiry_daemon):
-    def daemon_loop():
-        while True:
-            now_ist = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5, minutes=30)))
-            m_open, m_close = now_ist.replace(hour=9, minute=15, second=0, microsecond=0), now_ist.replace(hour=15, minute=30, second=0, microsecond=0)
-            is_live = now_ist.weekday() < 5 and (m_open <= now_ist <= m_close)
-            
-            if is_live:
-                try:
-                    df_oc, spot_pr, _ = fetch_gex_option_chain(selected_expiry_daemon)
-                    if df_oc is not None and not df_oc.empty:
-                        now_ts = int(time.time())
-                        today_str = now_ist.strftime("%Y-%m-%d")
-                        
-                        # 1. Update Absorption Memory
-                        abs_df = get_persisted_df("absorption_history", ["Date", "Timestamp", "Spot", "Fut_LTP", "CE_OI", "PE_OI", "CE_Vol", "PE_Vol"])
-                        if abs_df.empty or (now_ts - abs_df["Timestamp"].max() >= 60):
-                            new_abs = pd.DataFrame([{"Date": today_str, "Timestamp": now_ts, "Spot": spot_pr, "Fut_LTP": live_ws_data.get("NIFTY_FUT_LTP", spot_pr), "CE_OI": df_oc["CE_OI"].sum(), "PE_OI": df_oc["PE_OI"].sum(), "CE_Vol": df_oc["CE_Vol"].sum(), "PE_Vol": df_oc["PE_Vol"].sum()}])
-                            save_persisted_df(pd.concat([abs_df, new_abs], ignore_index=True), "absorption_history")
-                        
-                        # 2. Update OI Snapshots
-                        oi_snap = get_persisted_df("oi_snapshots", ["Date", "Timestamp", "Strike", "CE_OI", "PE_OI", "CE_LTP", "PE_LTP"])
-                        if oi_snap.empty or (now_ts - oi_snap["Timestamp"].max() >= 60):
-                            new_snap = df_oc[["Strike", "CE_OI", "PE_OI", "CE_LTP", "PE_LTP"]].copy()
-                            new_snap["Timestamp"] = now_ts; new_snap["Date"] = today_str
-                            save_persisted_df(pd.concat([oi_snap, new_snap], ignore_index=True), "oi_snapshots")
-                except: pass
-            time.sleep(60) # Run every 60 seconds
-    
-    threading.Thread(target=daemon_loop, daemon=True).start()
-    return True
 
 # ---------------------------------------------------------
 # 4. BLACK-SCHOLES GREEK ENGINE (Nifty 65 Precision)
@@ -395,11 +356,11 @@ def fetch_gex_option_chain(expiry_date):
         else: return None, 0.0, str(data.get("remarks") or data.get("message") or f"HTTP {res.status_code}")
     except Exception as e: return None, 0.0, f"Connection Error: {str(e)}"
 
-@st.cache_data(ttl=120)
+@st.cache_data(ttl=120, show_spinner=False)
 def fetch_multi_expiry_vol_structure(spot_price, valid_exp_list):
     vol_data, surface_data = [], []
     for idx, exp in enumerate(valid_exp_list):
-        if idx > 0: time.sleep(1.2)
+        if idx > 0: time.sleep(3.2) # Hard lock 3.2s to bypass Dhan rate limits
         df_exp, exp_spot, _ = fetch_gex_option_chain(exp)
         if df_exp is not None and not df_exp.empty:
             temp_spot_atm = int(round(exp_spot / 50) * 50)
@@ -429,7 +390,6 @@ def fetch_multi_expiry_vol_structure(spot_price, valid_exp_list):
         df_vol["Forward_Vol"] = fwd_vols
     return df_vol, df_surf
 
-
 # ---------------------------------------------------------
 # 6. SESSION & LIVE ENGINE INITIALIZATION
 # ---------------------------------------------------------
@@ -447,9 +407,6 @@ elif not is_market_live: st.sidebar.info("Market Closed. Dashboard in Static Rev
 try: valid_expiries = requests.post("https://api.dhan.co/v2/optionchain/expirylist", headers={"client-id": CLIENT_ID, "access-token": ACCESS_TOKEN, "Content-Type": "application/json"}, json={"UnderlyingScrip": 13, "UnderlyingSeg": "IDX_I"}, timeout=5).json().get("data", [])
 except: valid_expiries = []
 selected_expiry = st.sidebar.selectbox("Primary Expiry", valid_expiries) if valid_expiries else st.sidebar.date_input("Primary Expiry").strftime("%Y-%m-%d")
-
-# Boot the background daemon using the selected expiry
-daemon_running = start_background_daemon(selected_expiry)
 
 df_oc, spot_price, error_remark = fetch_gex_option_chain(selected_expiry)
 
@@ -524,40 +481,54 @@ elif df_oc is not None and not df_oc.empty:
             if len(st.session_state["chain_snapshots"]) > 80:
                 del st.session_state["chain_snapshots"][next(iter(st.session_state["chain_snapshots"]))]
 
-    # Extracting DataFrames from Parquet/Session 
-    abs_df = get_persisted_df("absorption_history", ["Date", "Timestamp", "Spot", "Fut_LTP", "CE_OI", "PE_OI", "CE_Vol", "PE_Vol"])
-    oi_snap = get_persisted_df("oi_snapshots", ["Date", "Timestamp", "Strike", "CE_OI", "PE_OI", "CE_LTP", "PE_LTP"])
-    iv_hist = get_persisted_df("iv_spread_history", ["Date", "Time", "Strike", "CE_IV", "PE_IV", "IV_Spread", "Spot"])
-    pcr_df = get_persisted_df("pcr_history", ["Date", "Timestamp_dt", "Time", "PCR", "Vol_PCR", "Delta_PCR_5m", "Delta_PCR_15m", "Total_CE_OI", "Total_PE_OI"])
-    gex_df = get_persisted_df("gex_history", ["Date", "Timestamp_dt", "Time", "Total_Net_GEX", "Z_GEX", "Flip_Strike", "Spot", "Max_Pain"])
-    synth_df = get_persisted_df("synth_history", ["Date", "Time", "Spot", "Strike_M50", "Strike_ATM", "Strike_P50", "Synth_M50", "Synth_ATM", "Synth_P50", "PCP_Dev_Mean"])
-    doi_df = get_persisted_df("delta_oi_history", ["Date", "Timestamp_dt", "Time", "Total_Net_Delta_OI", "Delta_OI_ROC_1m", "Total_Net_DEX", "DEX_Vel_5m"])
-    strad_df = get_persisted_df("straddle_history", ["Date", "Time", "Elapsed_Mins", "Actual_Straddle", "Expected_Straddle", "Regime", "Straddle_VWAP"])
-    
-    # Live updating the active session state if live
+    # Live Data Collection logic (Rebinds directly to session_state)
+    abs_df = st.session_state["absorption_history"]
     if is_market_live:
-        if st.session_state["iv_spread_history"].empty or st.session_state["iv_spread_history"].iloc[-1]["Time"] != now_time_str:
+        if abs_df.empty or (now_ts - abs_df["Timestamp"].max() >= 60):
+            new_abs = pd.DataFrame([{"Date": today_date_str, "Timestamp": now_ts, "Spot": spot_price, "Fut_LTP": live_ws_data.get("NIFTY_FUT_LTP", spot_price), "CE_OI": total_ce_oi_sum, "PE_OI": total_pe_oi_sum, "CE_Vol": df_oc["CE_Vol"].sum(), "PE_Vol": df_oc["PE_Vol"].sum()}])
+            st.session_state["absorption_history"] = pd.concat([abs_df, new_abs], ignore_index=True)
+            save_persisted_df(st.session_state["absorption_history"], "absorption_history")
+            abs_df = st.session_state["absorption_history"]
+
+    oi_snap = st.session_state["oi_snapshots"]
+    if is_market_live:
+        if oi_snap.empty or (now_ts - oi_snap["Timestamp"].max() >= 60):
+            new_snap = df_oc[["Strike", "CE_OI", "PE_OI", "CE_LTP", "PE_LTP"]].copy()
+            new_snap["Timestamp"] = now_ts
+            new_snap["Date"] = today_date_str
+            st.session_state["oi_snapshots"] = pd.concat([oi_snap, new_snap], ignore_index=True)
+            save_persisted_df(st.session_state["oi_snapshots"], "oi_snapshots")
+            oi_snap = st.session_state["oi_snapshots"]
+
+    iv_hist = st.session_state["iv_spread_history"]
+    if is_market_live:
+        if iv_hist.empty or str(iv_hist.iloc[-1]["Time"]) != now_time_str:
             new_ticks = [{"Date": today_date_str, "Time": now_time_str, "Strike": r["Strike"], "CE_IV": r["CE_IV"], "PE_IV": r["PE_IV"], "IV_Spread": r["IV_Spread"], "Spot": spot_price} for _, r in df_filtered.iterrows()]
-            st.session_state["iv_spread_history"] = pd.concat([st.session_state["iv_spread_history"], pd.DataFrame(new_ticks)], ignore_index=True)
+            st.session_state["iv_spread_history"] = pd.concat([iv_hist, pd.DataFrame(new_ticks)], ignore_index=True)
             save_persisted_df(st.session_state["iv_spread_history"], "iv_spread_history")
             iv_hist = st.session_state["iv_spread_history"]
         
+    pcr_df = st.session_state["pcr_history"]
+    if is_market_live:
         current_pcr = total_pe_oi_sum / total_ce_oi_sum if total_ce_oi_sum > 0 else 0.0
         vol_pcr = df_oc["PE_Vol"].sum() / df_oc["CE_Vol"].sum() if df_oc["CE_Vol"].sum() > 0 else 0.0
-        
-        if pcr_df.empty or pcr_df.iloc[-1]["Time"] != now_time_str:
+        if pcr_df.empty or str(pcr_df.iloc[-1]["Time"]) != now_time_str:
             dp_15m = current_pcr - pcr_df[pcr_df["Timestamp_dt"] <= now_ist - datetime.timedelta(minutes=15)].iloc[-1]["PCR"] if not pcr_df[pcr_df["Timestamp_dt"] <= now_ist - datetime.timedelta(minutes=15)].empty else 0.0
             st.session_state["pcr_history"] = pd.concat([pcr_df, pd.DataFrame([{"Date": today_date_str, "Timestamp_dt": now_ist, "Time": now_time_str, "PCR": current_pcr, "Vol_PCR": vol_pcr, "Delta_PCR_5m": 0.0, "Delta_PCR_15m": dp_15m, "Total_CE_OI": total_ce_oi_sum, "Total_PE_OI": total_pe_oi_sum}])], ignore_index=True)
             save_persisted_df(st.session_state["pcr_history"], "pcr_history")
             pcr_df = st.session_state["pcr_history"]
 
-        if gex_df.empty or gex_df.iloc[-1]["Time"] != now_time_str:
+    gex_df = st.session_state["gex_history"]
+    if is_market_live:
+        if gex_df.empty or str(gex_df.iloc[-1]["Time"]) != now_time_str:
             z_gex = (df_oc["Net_GEX"].sum() - gex_df["Total_Net_GEX"].tail(20).mean()) / gex_df["Total_Net_GEX"].tail(20).std() if len(gex_df) >= 2 and gex_df["Total_Net_GEX"].tail(20).std() > 0 else 0.0
             st.session_state["gex_history"] = pd.concat([gex_df, pd.DataFrame([{"Date": today_date_str, "Timestamp_dt": now_ist, "Time": now_time_str, "Total_Net_GEX": df_oc["Net_GEX"].sum(), "Z_GEX": z_gex, "Flip_Strike": gamma_flip_strike, "Spot": spot_price, "Max_Pain": max_pain_strike}])], ignore_index=True)
             save_persisted_df(st.session_state["gex_history"], "gex_history")
             gex_df = st.session_state["gex_history"]
 
-        if synth_df.empty or synth_df.iloc[-1]["Time"] != now_time_str:
+    synth_df = st.session_state["synth_history"]
+    if is_market_live:
+        if synth_df.empty or str(synth_df.iloc[-1]["Time"]) != now_time_str:
             r_m50, r_atm, r_p50 = df_oc[df_oc["Strike"] == strike_m50], df_oc[df_oc["Strike"] == atm_strike], df_oc[df_oc["Strike"] == strike_p50]
             s_m50 = strike_m50 + r_m50["CE_LTP"].values[0] - r_m50["PE_LTP"].values[0] if not r_m50.empty else spot_price
             s_atm = atm_strike + r_atm["CE_LTP"].values[0] - r_atm["PE_LTP"].values[0] if not r_atm.empty else spot_price
@@ -566,14 +537,18 @@ elif df_oc is not None and not df_oc.empty:
             save_persisted_df(st.session_state["synth_history"], "synth_history")
             synth_df = st.session_state["synth_history"]
 
-        if doi_df.empty or doi_df.iloc[-1]["Time"] != now_time_str:
+    doi_df = st.session_state["delta_oi_history"]
+    if is_market_live:
+        if doi_df.empty or str(doi_df.iloc[-1]["Time"]) != now_time_str:
             d_roc_1m = df_oc["Net_Delta_OI"].sum() - doi_df[doi_df["Timestamp_dt"] <= now_ist - datetime.timedelta(minutes=1)].iloc[-1]["Total_Net_Delta_OI"] if not doi_df[doi_df["Timestamp_dt"] <= now_ist - datetime.timedelta(minutes=1)].empty else 0.0
             dex_vel = (df_oc["Net_DEX"].sum()) - doi_df[doi_df["Timestamp_dt"] <= now_ist - datetime.timedelta(minutes=5)].iloc[-1]["Total_Net_DEX"] if not doi_df[doi_df["Timestamp_dt"] <= now_ist - datetime.timedelta(minutes=5)].empty else 0.0
             st.session_state["delta_oi_history"] = pd.concat([doi_df, pd.DataFrame([{"Date": today_date_str, "Timestamp_dt": now_ist, "Time": now_time_str, "Total_Net_Delta_OI": df_oc["Net_Delta_OI"].sum(), "Delta_OI_ROC_1m": d_roc_1m, "Total_Net_DEX": df_oc["Net_DEX"].sum(), "DEX_Vel_5m": dex_vel}])], ignore_index=True)
             save_persisted_df(st.session_state["delta_oi_history"], "delta_oi_history")
             doi_df = st.session_state["delta_oi_history"]
 
-        if strad_df.empty or strad_df.iloc[-1]["Time"] != now_time_str:
+    strad_df = st.session_state["straddle_history"]
+    if is_market_live:
+        if strad_df.empty or str(strad_df.iloc[-1]["Time"]) != now_time_str:
             r_atm_cur = df_oc[df_oc["Strike"] == atm_strike]
             c_strad = (r_atm_cur["CE_LTP"].values[0] if not r_atm_cur.empty else 0.0) + (r_atm_cur["PE_LTP"].values[0] if not r_atm_cur.empty else 0.0)
             e_mins = max(0, min((now_ist - m_open).total_seconds() / 60.0, 375)) 
@@ -585,21 +560,7 @@ elif df_oc is not None and not df_oc.empty:
             st.session_state["straddle_history"] = pd.concat([strad_df, pd.DataFrame([{"Date": today_date_str, "Time": now_time_str, "Elapsed_Mins": e_mins, "Actual_Straddle": c_strad, "Expected_Straddle": e_strad, "Regime": regime, "Straddle_VWAP": strad_vwap}])], ignore_index=True)
             save_persisted_df(st.session_state["straddle_history"], "straddle_history")
             strad_df = st.session_state["straddle_history"]
-
-    # ---------------------------------------------------------
-    # 8. DASHBOARD UI RENDERING
-    # ---------------------------------------------------------
-    st.markdown(f"### PRINCE PAX DASHBOARD")
-    st.markdown(f'<div class="status-badge {"status-live" if is_market_live else "status-closed"}">{"🟢 LIVE MARKET" if is_market_live else "🟠 MARKET CLOSED"} | Expiry: {selected_expiry} | IST: {now_time_str}</div>', unsafe_allow_html=True)
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    n1, n2, n3, n4 = st.columns(4)
-    n1.markdown(f'<div class="metric-card metric-card-amber"><div class="metric-title">NIFTY SYNTH FUT (ATM)</div><div class="metric-value">₹{synthetic_future:,.2f}</div><div class="metric-sub sub-amber">Spot: ₹{spot_price:,.2f} | Pain: {max_pain_strike}</div></div>', unsafe_allow_html=True)
-    n2.markdown(f'<div class="metric-card {"metric-card-green" if target_iv_spread >= 0 else "metric-card-red"}"><div class="metric-title">{selected_target_strike} IV SPREAD</div><div class="metric-value">{target_iv_spread:+.2f}%</div><div class="metric-sub {"sub-green" if target_iv_spread >= 0 else "sub-red"}">CE {(target_row["CE_IV"].values[0]*100) if not target_row.empty else 0:.1f}% | PE {(target_row["PE_IV"].values[0]*100) if not target_row.empty else 0:.1f}%</div></div>', unsafe_allow_html=True)
-    dp_15m = pcr_df.iloc[-1]["Delta_PCR_15m"] if not pcr_df.empty else 0.0
-    n3.markdown(f'<div class="metric-card {"metric-card-green" if dp_15m >= 0.15 else ("metric-card-red" if dp_15m <= -0.15 else "metric-card-amber")}"><div class="metric-title">ΔPCR 15M VELOCITY</div><div class="metric-value">{dp_15m:+.2f}</div><div class="metric-sub {"sub-green" if dp_15m >= 0.15 else ("sub-red" if dp_15m <= -0.15 else "sub-amber")}">PCR: {pcr_df.iloc[-1]["PCR"] if not pcr_df.empty else 0:.2f}</div></div>', unsafe_allow_html=True)
-    n4.markdown(f'<div class="metric-card {"metric-card-green" if df_oc["Net_Delta_OI"].sum() >= 0 else "metric-card-red"}"><div class="metric-title">NET DELTA OI</div><div class="metric-value">{df_oc["Net_Delta_OI"].sum():+,.0f}</div><div class="metric-sub {"sub-green" if (doi_df.iloc[-1]["Delta_OI_ROC_1m"] if not doi_df.empty else 0) >= 0 else "sub-red"}">1m ROC: {doi_df.iloc[-1]["Delta_OI_ROC_1m"] if not doi_df.empty else 0:+,.0f}</div></div>', unsafe_allow_html=True)
-
+    
     intraday_rv, vrp = 0.0, 0.0
     atm_iv = (target_row["CE_IV"].values[0] + target_row["PE_IV"].values[0]) / 2.0 * 100 if not target_row.empty else 0.0
     if not synth_df.empty and len(synth_df) > 5:
@@ -618,6 +579,20 @@ elif df_oc is not None and not df_oc.empty:
 
     cz_gex = gex_df.iloc[-1]["Z_GEX"] if not gex_df.empty else 0.0
     strad_reg = strad_df.iloc[-1]["Regime"] if not strad_df.empty else "NORMAL"
+
+    # ---------------------------------------------------------
+    # 8. DASHBOARD UI RENDERING
+    # ---------------------------------------------------------
+    st.markdown(f"### PRINCE PAX DASHBOARD")
+    st.markdown(f'<div class="status-badge {"status-live" if is_market_live else "status-closed"}">{"🟢 LIVE MARKET" if is_market_live else "🟠 MARKET CLOSED"} | Expiry: {selected_expiry} | IST: {now_time_str}</div>', unsafe_allow_html=True)
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    n1, n2, n3, n4 = st.columns(4)
+    n1.markdown(f'<div class="metric-card metric-card-amber"><div class="metric-title">NIFTY SYNTH FUT (ATM)</div><div class="metric-value">₹{synthetic_future:,.2f}</div><div class="metric-sub sub-amber">Spot: ₹{spot_price:,.2f} | Pain: {max_pain_strike}</div></div>', unsafe_allow_html=True)
+    n2.markdown(f'<div class="metric-card {"metric-card-green" if target_iv_spread >= 0 else "metric-card-red"}"><div class="metric-title">{selected_target_strike} IV SPREAD</div><div class="metric-value">{target_iv_spread:+.2f}%</div><div class="metric-sub {"sub-green" if target_iv_spread >= 0 else "sub-red"}">CE {(target_row["CE_IV"].values[0]*100) if not target_row.empty else 0:.1f}% | PE {(target_row["PE_IV"].values[0]*100) if not target_row.empty else 0:.1f}%</div></div>', unsafe_allow_html=True)
+    dp_15m = pcr_df.iloc[-1]["Delta_PCR_15m"] if not pcr_df.empty else 0.0
+    n3.markdown(f'<div class="metric-card {"metric-card-green" if dp_15m >= 0.15 else ("metric-card-red" if dp_15m <= -0.15 else "metric-card-amber")}"><div class="metric-title">ΔPCR 15M VELOCITY</div><div class="metric-value">{dp_15m:+.2f}</div><div class="metric-sub {"sub-green" if dp_15m >= 0.15 else ("sub-red" if dp_15m <= -0.15 else "sub-amber")}">PCR: {pcr_df.iloc[-1]["PCR"] if not pcr_df.empty else 0:.2f}</div></div>', unsafe_allow_html=True)
+    n4.markdown(f'<div class="metric-card {"metric-card-green" if df_oc["Net_Delta_OI"].sum() >= 0 else "metric-card-red"}"><div class="metric-title">NET DELTA OI</div><div class="metric-value">{df_oc["Net_Delta_OI"].sum():+,.0f}</div><div class="metric-sub {"sub-green" if (doi_df.iloc[-1]["Delta_OI_ROC_1m"] if not doi_df.empty else 0) >= 0 else "sub-red"}">1m ROC: {doi_df.iloc[-1]["Delta_OI_ROC_1m"] if not doi_df.empty else 0:+,.0f}</div></div>', unsafe_allow_html=True)
 
     m1, m2, m3, m4 = st.columns(4)
     m1.markdown(f'<div class="metric-card {"metric-card-green" if "COIL" in strad_reg else "metric-card-amber"}"><div class="metric-title">STRADDLE DECAY</div><div class="metric-value">₹{strad_df.iloc[-1]["Actual_Straddle"] if not strad_df.empty else 0:.1f}</div><div class="metric-sub {"sub-green" if "COIL" in strad_reg else "sub-amber"}">{strad_reg}</div></div>', unsafe_allow_html=True)
