@@ -54,13 +54,6 @@ except Exception as e:
     YF_AVAILABLE = False
     log_error(f"yFinance Import Failed: {e}")
 
-try:
-    from scipy.stats import norm
-    SCIPY_AVAILABLE = True
-except Exception as e:
-    SCIPY_AVAILABLE = False
-    log_error(f"Scipy missing. Fallback to math.erf (slower).")
-
 NIFTY_50_WEIGHTS = {
     "HDFCBANK.NS": 11.6, "RELIANCE.NS": 9.8, "ICICIBANK.NS": 7.9, "INFY.NS": 5.8, "ITC.NS": 4.5,
     "TCS.NS": 4.1, "LT.NS": 3.4, "AXISBANK.NS": 3.2, "KOTAKBANK.NS": 2.8, "SBIN.NS": 2.7,
@@ -109,6 +102,14 @@ st.markdown(
 # ---------------------------------------------------------
 # 3. HELPER FUNCTIONS & CHART ENGINE
 # ---------------------------------------------------------
+def safe_float(val, default=0.0):
+    """Bulletproof string/null parser for API data."""
+    try:
+        if val is None or str(val).strip() == "": return default
+        return float(val)
+    except:
+        return default
+
 def fmt_num(val):
     if pd.isna(val): return "0"
     abs_val = abs(val)
@@ -119,15 +120,8 @@ def fmt_num(val):
     return f"{sign}{abs_val:.0f}"
 
 def apply_dark_layout(fig, height=250, is_strike_axis=False, df_filtered=None, atm_strike=None):
-    """Upgraded layout engine for perfect visual clarity."""
-    fig.update_layout(
-        template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", 
-        margin=dict(l=5, r=5, t=20, b=5), height=height, 
-        legend=dict(orientation="h", y=1.1, x=0, font=dict(size=10)), 
-        bargap=0.15 # Widens the bars cleanly
-    )
+    fig.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", margin=dict(l=5, r=5, t=20, b=5), height=height, legend=dict(orientation="h", y=1.1, x=0, font=dict(size=10)), bargap=0.15)
     if is_strike_axis and df_filtered is not None and not df_filtered.empty:
-        # Forces exactly 50-point spacing, preventing overlapping text
         fig.update_xaxes(tickmode='linear', dtick=50, tickangle=-45, gridcolor="#2A2E39", zerolinecolor="#2A2E39", tickfont=dict(size=10, color="#D1D4DC"))
     else:
         fig.update_xaxes(gridcolor="#2A2E39", zerolinecolor="#2A2E39", tickfont=dict(size=10))
@@ -164,20 +158,14 @@ def send_telegram_alert(message: str):
 def process_camarilla_alerts(df_camarilla, is_market_live, today_date_str):
     if not is_market_live: return
     if "telegram_cooldowns" not in st.session_state: st.session_state["telegram_cooldowns"] = {}
-    
     for _, row in df_camarilla.iterrows():
-        sym = row["Symbol"]
-        w = row["Weight"]
-        ltp = row["LTP"]
-        
-        # 1 Alert per day per level per stock
+        sym, w, ltp = row["Symbol"], row["Weight"], row["LTP"]
         if row["Dist_S3_%"] <= 0.15:
             key = f"{sym}_S3"
             if st.session_state["telegram_cooldowns"].get(key) != today_date_str:
                 msg = f"🟢 *CAMARILLA S3 TESTED*\n\n*Stock:* `{sym}` (Weight: {w}%)\n*LTP:* ₹{ltp:,.2f} | *S3:* ₹{row['S3']:,.2f}\n*Distance:* `{row['Dist_S3_%']:.2f}%`\n\n⚡ *Nifty Support / Rebound Candidate*"
                 send_telegram_alert(msg)
                 st.session_state["telegram_cooldowns"][key] = today_date_str
-                
         elif row["Dist_R3_%"] <= 0.15:
             key = f"{sym}_R3"
             if st.session_state["telegram_cooldowns"].get(key) != today_date_str:
@@ -188,48 +176,32 @@ def process_camarilla_alerts(df_camarilla, is_market_live, today_date_str):
 # ---------------------------------------------------------
 # 4. MATHEMATICAL ENGINE & GREEKS
 # ---------------------------------------------------------
-def calculate_bs_greeks_vectorized(S, K_array, T, iv_ce_array, iv_pe_array, r=RISK_FREE_RATE, q=NIFTY_DIVIDEND_YIELD):
-    """Highly optimized vectorized Greek calculator."""
-    T = max(T, 1e-5)
-    iv_ce = np.maximum(iv_ce_array, 1e-4)
-    iv_pe = np.maximum(iv_pe_array, 1e-4)
-    
-    d1_ce = (np.log(S / K_array) + (r - q + 0.5 * iv_ce**2) * T) / (iv_ce * np.sqrt(T))
-    d2_ce = d1_ce - iv_ce * np.sqrt(T)
-    d1_pe = (np.log(S / K_array) + (r - q + 0.5 * iv_pe**2) * T) / (iv_pe * np.sqrt(T))
-    d2_pe = d1_pe - iv_pe * np.sqrt(T)
-    
-    if SCIPY_AVAILABLE:
-        pdf_ce, cdf_ce = norm.pdf(d1_ce), norm.cdf(d1_ce)
-        pdf_pe, cdf_pe = norm.pdf(d1_pe), norm.cdf(d1_pe)
-    else:
-        cdf_ce = 0.5 * (1.0 + np.vectorize(math.erf)(d1_ce / np.sqrt(2.0)))
-        cdf_pe = 0.5 * (1.0 + np.vectorize(math.erf)(d1_pe / np.sqrt(2.0)))
-        pdf_ce = np.exp(-0.5 * d1_ce**2) / np.sqrt(2 * np.pi)
-        pdf_pe = np.exp(-0.5 * d1_pe**2) / np.sqrt(2 * np.pi)
+def calculate_bs_greeks(S, K, T, sigma, r=RISK_FREE_RATE, q=NIFTY_DIVIDEND_YIELD):
+    """Underflow-safe scalar Greek engine."""
+    if T <= 1e-5 or sigma <= 1e-4 or S <= 0 or K <= 0: 
+        return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+    try:
+        d1 = (math.log(S / K) + (r - q + 0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
+        d2 = d1 - sigma * math.sqrt(T)
         
-    exp_qT = np.exp(-q * T)
-    
-    ce_delta = exp_qT * cdf_ce
-    pe_delta = exp_qT * (cdf_pe - 1.0)
-    gamma = exp_qT * pdf_ce / (S * iv_ce * np.sqrt(T))
-    
-    ce_vega = S * exp_qT * pdf_ce * np.sqrt(T) / 100.0
-    pe_vega = S * exp_qT * pdf_pe * np.sqrt(T) / 100.0
-    
-    ce_vanna = -exp_qT * pdf_ce * d2_ce / iv_ce
-    pe_vanna = -exp_qT * pdf_pe * d2_pe / iv_pe
-    
-    ce_charm = q * exp_qT * cdf_ce - exp_qT * pdf_ce * (2 * (r - q) * T - d2_ce * iv_ce * np.sqrt(T)) / (2 * T * iv_ce * np.sqrt(T))
-    pe_charm = ce_charm - q * exp_qT
-    
-    ce_speed = -exp_qT * pdf_ce / (S**2 * iv_ce * np.sqrt(T)) * (1.0 + d1_ce / (iv_ce * np.sqrt(T)))
-    pe_speed = -exp_qT * pdf_pe / (S**2 * iv_pe * np.sqrt(T)) * (1.0 + d1_pe / (iv_pe * np.sqrt(T)))
-    
-    ce_vomma = ce_vega * d1_ce * d2_ce / iv_ce
-    pe_vomma = pe_vega * d1_pe * d2_pe / iv_pe
-    
-    return ce_delta, pe_delta, gamma, ce_vega, pe_vega, ce_vanna, pe_vanna, ce_charm, pe_charm, ce_speed, pe_speed, ce_vomma, pe_vomma
+        pdf_d1 = (1.0 / math.sqrt(2 * math.pi)) * math.exp(max(-0.5 * d1 * d1, -300))
+        cdf_d1 = 0.5 * (1.0 + math.erf(d1 / math.sqrt(2.0)))
+        exp_qT = math.exp(-q * T)
+        
+        ce_delta = exp_qT * cdf_d1
+        pe_delta = exp_qT * (cdf_d1 - 1.0)
+        gamma = exp_qT * pdf_d1 / (S * sigma * math.sqrt(T))
+        vega = S * exp_qT * pdf_d1 * math.sqrt(T) / 100.0  
+        vanna = -exp_qT * pdf_d1 * d2 / sigma
+        ce_charm = q * exp_qT * cdf_d1 - exp_qT * pdf_d1 * (2 * (r - q) * T - d2 * sigma * math.sqrt(T)) / (2 * T * sigma * math.sqrt(T))
+        pe_charm = ce_charm - q * exp_qT
+        speed = -exp_qT * pdf_d1 / (S**2 * sigma * math.sqrt(T)) * (1.0 + d1 / (sigma * math.sqrt(T)))
+        vomma = vega * d1 * d2 / sigma
+        
+        return ce_delta, pe_delta, gamma, vega, vanna, ce_charm, pe_charm, speed, vomma
+    except Exception as e:
+        log_error(f"Greek Calc Exception: {e}")
+        return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
 
 def calculate_forward_price(S, df: pd.DataFrame, T):
     if df.empty: return S
@@ -274,38 +246,39 @@ def fetch_gex_option_chain_raw(expiry_date):
         data = res.json()
         if data.get("status") != "success": return pd.DataFrame(), 0.0, str(data.get("remarks") or "API Failed")
 
-        spot_price = float(data.get("data", {}).get("last_price", 0.0))
+        spot_price = safe_float(data.get("data", {}).get("last_price"))
         oc_raw = data.get("data", {}).get("oc", {})
         if not oc_raw: return pd.DataFrame(), spot_price, "Empty options chain."
 
-        try: exp_date_obj = pd.to_datetime(expiry_date[:10], dayfirst=True).date()
+        try: exp_date_obj = pd.to_datetime(str(expiry_date)[:10]).date()
         except: exp_date_obj = datetime.date.today() + datetime.timedelta(days=1)
         T_years = max((exp_date_obj - datetime.date.today()).days, 1) / 365.0
         
         records = []
         for strike_str, details in oc_raw.items():
-            strike = int(float(strike_str))
-            ce, pe = details.get("ce", {}), details.get("pe", {})
+            strike = int(safe_float(strike_str))
+            ce = details.get("ce", {}) if isinstance(details.get("ce"), dict) else {}
+            pe = details.get("pe", {}) if isinstance(details.get("pe"), dict) else {}
             
-            ce_oi, pe_oi = float(ce.get("oi", 0)), float(pe.get("oi", 0))
-            ce_prev = float(ce.get("previous_oi") if ce.get("previous_oi") is not None else ce_oi)
-            pe_prev = float(pe.get("previous_oi") if pe.get("previous_oi") is not None else pe_oi)
-            ce_oichg = ce_oi - ce_prev
-            pe_oichg = pe_oi - pe_prev
+            ce_oi, pe_oi = safe_float(ce.get("oi")), safe_float(pe.get("oi"))
+            ce_prev = safe_float(ce.get("previous_oi"), ce_oi)
+            pe_prev = safe_float(pe.get("previous_oi"), pe_oi)
+            ce_oichg, pe_oichg = ce_oi - ce_prev, pe_oi - pe_prev
 
-            ce_vol, pe_vol = float(ce.get("volume") or 0.0), float(pe.get("volume") or 0.0)
-            ce_ltp, pe_ltp = float(ce.get("last_price", 0)), float(pe.get("last_price", 0))
-            ce_iv, pe_iv = float(ce.get("implied_volatility", 0))/100.0, float(pe.get("implied_volatility", 0))/100.0
+            ce_vol, pe_vol = safe_float(ce.get("volume")), safe_float(pe.get("volume"))
+            ce_ltp, pe_ltp = safe_float(ce.get("last_price")), safe_float(pe.get("last_price"))
+            ce_iv, pe_iv = safe_float(ce.get("implied_volatility"))/100.0, safe_float(pe.get("implied_volatility"))/100.0
 
-            ce_delta, _, ce_gamma, ce_vega, ce_vanna, ce_charm, _, ce_speed, ce_vomma = calculate_bs_greeks(spot_price, strike, T_years, max(ce_iv, 0.01))
-            _, pe_delta, pe_gamma, pe_vega, pe_vanna, _, pe_charm, pe_speed, pe_vomma = calculate_bs_greeks(spot_price, strike, T_years, max(pe_iv, 0.01))
+            ce_delta, pe_delta, gamma, ce_vega, pe_vega, ce_vanna, pe_vanna, ce_charm, pe_charm, ce_speed, pe_speed, ce_vomma, pe_vomma = calculate_bs_greeks(spot_price, strike, T_years, max(ce_iv, 0.01), RISK_FREE_RATE, NIFTY_DIVIDEND_YIELD)
+            _, _, _, _, _, _, _, _, _, _, _, _, _ = calculate_bs_greeks(spot_price, strike, T_years, max(pe_iv, 0.01), RISK_FREE_RATE, NIFTY_DIVIDEND_YIELD) # Ensures independent IV execution
 
-            ce_vex = ce_oi * NIFTY_LOT_SIZE * ce_vanna * spot_price * 0.01 / 1e5
-            pe_vex = pe_oi * NIFTY_LOT_SIZE * pe_vanna * spot_price * 0.01 / 1e5
-            ce_chex = ce_oi * NIFTY_LOT_SIZE * ce_charm * (1.0/365.0) * spot_price / 1e5
-            pe_chex = pe_oi * NIFTY_LOT_SIZE * pe_charm * (1.0/365.0) * spot_price / 1e5
-            ce_spex = ce_oi * NIFTY_LOT_SIZE * ce_speed * (spot_price**3) * 0.0001 / 1e5
-            pe_spex = pe_oi * NIFTY_LOT_SIZE * pe_speed * (spot_price**3) * 0.0001 / 1e5
+            scalar = NIFTY_LOT_SIZE / 1e5
+            ce_vex = ce_oi * ce_vanna * spot_price * 0.01 * scalar
+            pe_vex = pe_oi * pe_vanna * spot_price * 0.01 * scalar
+            ce_chex = ce_oi * ce_charm * (1.0/365.0) * spot_price * scalar
+            pe_chex = pe_oi * pe_charm * (1.0/365.0) * spot_price * scalar
+            ce_spex = ce_oi * ce_speed * (spot_price**3) * 0.0001 * scalar
+            pe_spex = pe_oi * pe_speed * (spot_price**3) * 0.0001 * scalar
 
             records.append({
                 "Strike": strike, "CE_LTP": ce_ltp, "PE_LTP": pe_ltp, "CE_OI": ce_oi, "PE_OI": pe_oi, 
@@ -313,8 +286,8 @@ def fetch_gex_option_chain_raw(expiry_date):
                 "CE_Delta": ce_delta, "PE_Delta": pe_delta, "Net_Delta_OI": (ce_oi * ce_delta) + (pe_oi * pe_delta),
                 "Net_DEX": (ce_oi * ce_delta + pe_oi * pe_delta) * NIFTY_LOT_SIZE * spot_price / 1e5,
                 "ABS_DEX": (abs(ce_oi * ce_delta) + abs(pe_oi * pe_delta)) * NIFTY_LOT_SIZE * spot_price / 1e5,
-                "Call_GEX": ce_oi * NIFTY_LOT_SIZE * ce_gamma * (spot_price**2) * 0.01 / 1e5,
-                "Put_GEX": -pe_oi * NIFTY_LOT_SIZE * pe_gamma * (spot_price**2) * 0.01 / 1e5,
+                "Call_GEX": ce_oi * NIFTY_LOT_SIZE * gamma * (spot_price**2) * 0.01 / 1e5,
+                "Put_GEX": -pe_oi * NIFTY_LOT_SIZE * gamma * (spot_price**2) * 0.01 / 1e5,
                 "CE_VEX": ce_vex, "PE_VEX": pe_vex, "Net_VEX": ce_vex - pe_vex, 
                 "CE_CHEX": ce_chex, "PE_CHEX": pe_chex, "Net_CHEX": ce_chex - pe_chex,
                 "CE_SPEX": ce_spex, "PE_SPEX": pe_spex, "Net_SPEX": ce_spex - pe_spex,
@@ -327,12 +300,10 @@ def fetch_gex_option_chain_raw(expiry_date):
         df["Net_GEX"] = df["Call_GEX"] + df["Put_GEX"]
         df["ABS_GEX"] = df["Call_GEX"] + df["Put_GEX"].abs()
         return df.sort_values("Strike").reset_index(drop=True), spot_price, None
-    except requests.exceptions.RequestException as e:
-        log_error(f"API Request Failed: {e}")
-        return None, 0.0, "Connection Error"
     except Exception as e:
-        log_error(f"Data Processing Error: {e}")
-        return None, 0.0, f"Processing Error"
+        err_msg = f"Data Processing Error: {str(e)}"
+        log_error(err_msg)
+        return pd.DataFrame(), 0.0, err_msg
 
 @st.cache_data(ttl=3)
 def fetch_gex_option_chain(expiry_date):
@@ -344,11 +315,11 @@ def fetch_multi_expiry_vol_structure(spot_price, valid_exp_list):
     for idx, exp in enumerate(valid_exp_list):
         if idx > 0: time.sleep(3.5)
         df_exp, exp_spot, _ = fetch_gex_option_chain_raw(exp)
-        if df_exp is not None and not df_exp.empty:
+        if not df_exp.empty:
             temp_spot_atm = int(round(exp_spot / 50) * 50)
             atm_row = df_exp[df_exp["Strike"] == temp_spot_atm]
             mean_iv = (atm_row["CE_IV"].values[0] + atm_row["PE_IV"].values[0]) / 2.0 if not atm_row.empty else df_exp["CE_IV"].mean()
-            try: exp_date_obj = pd.to_datetime(exp[:10], dayfirst=True).date()
+            try: exp_date_obj = pd.to_datetime(str(exp)[:10]).date()
             except: continue
             days = max((exp_date_obj - datetime.date.today()).days, 1)
             vol_data.append({"Expiry": exp_date_obj.strftime("%d %b"), "Days": days, "Tenor_Years": days / 365.0, "Mean_IV": max(mean_iv, 0.01)})
@@ -427,7 +398,7 @@ def start_background_daemon():
                     exp = GLOBAL_STATE["selected_expiry"]
                     if exp:
                         df_oc, spot_pr, _ = fetch_gex_option_chain_raw(exp)
-                        if df_oc is not None and not df_oc.empty:
+                        if not df_oc.empty:
                             now_ts = int(time.time())
                             today_str = now_ist.strftime("%Y-%m-%d")
                             synth_fut = calculate_forward_price(spot_pr, df_oc, 1/365.0)
@@ -504,14 +475,14 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 if error_remark: 
-    st.error(f"⚠️ API Pipeline Offline: {error_remark}. Reconnecting on next tick..."); st.stop()
+    st.error(f"⚠️ API Pipeline Offline: {error_remark}. Check 'System Logs' tab for details. Reconnecting on next tick..."); st.stop()
 elif df_oc is None or df_oc.empty:
     st.warning("⚠️ API returned empty array. Rate limit active. Reconnecting..."); st.stop()
 
 # ---------------------------------------------------------
 # 7. METRICS COMPILATION
 # ---------------------------------------------------------
-try: exp_date = pd.to_datetime(selected_expiry[:10]).date()
+try: exp_date = pd.to_datetime(str(selected_expiry)[:10]).date()
 except: exp_date = datetime.date.today() + datetime.timedelta(days=1)
 T_years = max((exp_date - datetime.date.today()).days, 1) / 365.0
 
@@ -595,7 +566,14 @@ if is_market_live:
         save_persisted_df(st.session_state["synth_history"], "synth_history")
 
 # Load Memory explicitly for UI graphs
-abs_df, oi_snap, iv_hist, pcr_df, gex_df, doi_df, strad_df, synth_df = st.session_state["absorption_history"], st.session_state["oi_snapshots"], st.session_state["iv_spread_history"], st.session_state["pcr_history"], st.session_state["gex_history"], st.session_state["delta_oi_history"], st.session_state["straddle_history"], st.session_state["synth_history"]
+abs_df = st.session_state["absorption_history"]
+oi_snap = st.session_state["oi_snapshots"]
+iv_hist = st.session_state["iv_spread_history"]
+pcr_df = st.session_state["pcr_history"]
+gex_df = st.session_state["gex_history"]
+doi_df = st.session_state["delta_oi_history"]
+strad_df = st.session_state["straddle_history"]
+synth_df = st.session_state["synth_history"]
 
 # PREMIUM HERO BANNER
 st.markdown(f'<div class="hero-banner"><div style="color:var(--text-muted); font-size:1.1rem; font-weight:800; letter-spacing:1px; margin-bottom:5px;">NIFTY SYNTHETIC FUTURE (TRUE FWD)</div><div style="color:var(--text-main); font-size:3.5rem; font-weight:900; letter-spacing:-1px; text-shadow: 0px 0px 10px rgba(255,255,255,0.1);">₹{synthetic_future:,.2f}</div><div style="color:var(--amber); font-size:1rem; font-weight:600; margin-top:5px;">Spot Market: ₹{spot_price:,.2f} &nbsp;&nbsp;|&nbsp;&nbsp; Interpolated Gamma Flip: {gamma_flip_strike:.1f}</div></div>', unsafe_allow_html=True)
@@ -915,6 +893,29 @@ with tab3: # INTRADAY & ADVANCED ANALYTICS
             fig_synth.add_trace(go.Scatter(x=synth_df["Time"], y=synth_df["Synth_ATM"], mode="lines", name="ATM Synth", line=dict(color="#29B6F6", width=1.5, dash="dot")))
             fig_synth.add_trace(go.Scatter(x=synth_df["Time"], y=synth_df["Synth_P50"], mode="lines", name="OTM Synth", line=dict(color="#FF5252", width=1.5, dash="dot")))
         st.plotly_chart(apply_dark_layout(fig_synth), use_container_width=True, config=PLOT_CONFIG)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    a3, a4 = st.columns(2)
+    with a3:
+        st.markdown('<div class="chart-container"><div class="chart-title">Fyers ATM Straddle LTP vs Straddle VWAP</div>', unsafe_allow_html=True)
+        fig_fyers_strad = make_subplots(specs=[[{"secondary_y": True}]])
+        if not strad_df.empty:
+            fig_fyers_strad.add_trace(go.Scatter(x=strad_df["Time"], y=strad_df["Actual_Straddle"], mode="lines", name="ATM Straddle LTP", line=dict(color="#FF5252", width=2)), secondary_y=False)
+            if "Straddle_VWAP" in strad_df.columns:
+                fig_fyers_strad.add_trace(go.Scatter(x=strad_df["Time"], y=strad_df["Straddle_VWAP"], mode="lines", name="Straddle VWAP", line=dict(color="#00E676", width=1.5, dash="dot")), secondary_y=False)
+            if not synth_df.empty:
+                fig_fyers_strad.add_trace(go.Scatter(x=synth_df["Time"], y=synth_df["Spot"], mode="lines", name="Nifty Price", line=dict(color="#29B6F6", width=1.5, dash="dash")), secondary_y=True)
+        fig_fyers_strad.update_yaxes(title_text="Straddle Premium (₹)", secondary_y=False, gridcolor="#2A2E39")
+        fig_fyers_strad.update_yaxes(title_text="Nifty Price", secondary_y=True, showgrid=False)
+        st.plotly_chart(apply_dark_layout(fig_fyers_strad), use_container_width=True, config=PLOT_CONFIG)
+        st.markdown('</div>', unsafe_allow_html=True)
+    with a4:
+        st.markdown('<div class="chart-container"><div class="chart-title">Gamma Flip Migration (ΔFlip)</div>', unsafe_allow_html=True)
+        fig_flip = go.Figure()
+        if not gex_df.empty:
+            fig_flip.add_trace(go.Scatter(x=gex_df["Time"], y=gex_df["Spot"], mode="lines", name="Spot", line=dict(color="#FFD700", width=2)))
+            fig_flip.add_trace(go.Scatter(x=gex_df["Time"], y=gex_df["Flip_Strike"], mode="lines", name="Flip Level", line=dict(color="#29B6F6", width=2, dash="dash")))
+        st.plotly_chart(apply_dark_layout(fig_flip), use_container_width=True, config=PLOT_CONFIG)
         st.markdown('</div>', unsafe_allow_html=True)
 
 with tab4: # OPENBULL & FYERS SKEW
