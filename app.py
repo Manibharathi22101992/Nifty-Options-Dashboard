@@ -144,7 +144,7 @@ def apply_dark_layout(fig, height=250, is_strike_axis=False, df_filtered=None, a
     )
     if is_strike_axis and df_filtered is not None and not df_filtered.empty and atm_strike is not None:
         strike_labels = df_filtered["Strike"].astype(str).tolist()
-        fig.update_xaxes(range=[atm_strike - 550, atm_strike + 550], tickmode='array', tickvals=df_filtered["Strike"], ticktext=strike_labels, tickangle=-45, gridcolor="#2A2E39", zerolinecolor="#2A2E39", tickfont=dict(size=10, color="#D1D4DC"))
+        fig.update_xaxes(tickmode='array', tickvals=df_filtered["Strike"], ticktext=strike_labels, tickangle=-45, gridcolor="#2A2E39", zerolinecolor="#2A2E39", tickfont=dict(size=10, color="#D1D4DC"))
     else:
         fig.update_xaxes(gridcolor="#2A2E39", zerolinecolor="#2A2E39", tickfont=dict(size=10))
     fig.update_yaxes(gridcolor="#2A2E39", zerolinecolor="#2A2E39", tickfont=dict(size=10))
@@ -212,12 +212,20 @@ def process_camarilla_alerts(df_camarilla, is_market_live, today_date_str):
 def get_nifty50_camarilla():
     if not YF_AVAILABLE: return pd.DataFrame()
     tickers = list(NIFTY_50_WEIGHTS.keys())
-    data = yf.download(tickers, period="2d", interval="1d", group_by='ticker', auto_adjust=True, progress=False)
+    try:
+        # Pull 5 days of data to guarantee at least 2 valid historical days even during long weekends
+        data = yf.download(tickers, period="5d", interval="1d", group_by='ticker', auto_adjust=True, progress=False)
+    except Exception:
+        return pd.DataFrame(columns=["Symbol", "Weight", "LTP", "S3", "R3", "Dist_S3_%", "Dist_R3_%"])
     
     records = []
     for ticker in tickers:
         try:
-            df_t = data[ticker].dropna()
+            if isinstance(data.columns, pd.MultiIndex):
+                df_t = data[ticker].dropna()
+            else:
+                df_t = data.dropna()
+
             if len(df_t) >= 2:
                 prev_h, prev_l, prev_c = df_t.iloc[-2]['High'], df_t.iloc[-2]['Low'], df_t.iloc[-2]['Close']
                 ltp = df_t.iloc[-1]['Close']
@@ -226,11 +234,15 @@ def get_nifty50_camarilla():
                 s3 = prev_c - (r_hl * 1.1 / 4)
                 records.append({
                     "Symbol": ticker.replace(".NS", ""), "Weight": NIFTY_50_WEIGHTS[ticker],
-                    "LTP": ltp, "S3": s3, "R3": r3,
-                    "Dist_S3_%": abs(ltp - s3) / s3 * 100, "Dist_R3_%": abs(ltp - r3) / r3 * 100
+                    "LTP": float(ltp), "S3": float(s3), "R3": float(r3),
+                    "Dist_S3_%": float(abs(ltp - s3) / s3 * 100), "Dist_R3_%": float(abs(ltp - r3) / r3 * 100)
                 })
         except: pass
-    return pd.DataFrame(records).sort_values("Weight", ascending=False)
+
+    df_cam = pd.DataFrame(records)
+    if not df_cam.empty and "Weight" in df_cam.columns:
+        return df_cam.sort_values("Weight", ascending=False)
+    return pd.DataFrame(columns=["Symbol", "Weight", "LTP", "S3", "R3", "Dist_S3_%", "Dist_R3_%"])
 
 def get_persisted_df(name, cols):
     if os.path.exists(f"{name}.parquet"):
@@ -281,6 +293,40 @@ def start_dhan_websocket(client_id, access_token):
     return ws_data
 
 live_ws_data = start_dhan_websocket(CLIENT_ID, ACCESS_TOKEN)
+
+# BACKGROUND DAEMON: Collects Data Even If Browser Is Closed
+@st.cache_resource
+def start_background_daemon(selected_expiry_daemon):
+    def daemon_loop():
+        while True:
+            now_ist = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5, minutes=30)))
+            m_open, m_close = now_ist.replace(hour=9, minute=15, second=0, microsecond=0), now_ist.replace(hour=15, minute=30, second=0, microsecond=0)
+            is_live = now_ist.weekday() < 5 and (m_open <= now_ist <= m_close)
+            
+            if is_live:
+                try:
+                    df_oc, spot_pr, _ = fetch_gex_option_chain(selected_expiry_daemon)
+                    if df_oc is not None and not df_oc.empty:
+                        now_ts = int(time.time())
+                        today_str = now_ist.strftime("%Y-%m-%d")
+                        
+                        # 1. Update Absorption Memory
+                        abs_df = get_persisted_df("absorption_history", ["Date", "Timestamp", "Spot", "Fut_LTP", "CE_OI", "PE_OI", "CE_Vol", "PE_Vol"])
+                        if abs_df.empty or (now_ts - abs_df["Timestamp"].max() >= 60):
+                            new_abs = pd.DataFrame([{"Date": today_str, "Timestamp": now_ts, "Spot": spot_pr, "Fut_LTP": live_ws_data.get("NIFTY_FUT_LTP", spot_pr), "CE_OI": df_oc["CE_OI"].sum(), "PE_OI": df_oc["PE_OI"].sum(), "CE_Vol": df_oc["CE_Vol"].sum(), "PE_Vol": df_oc["PE_Vol"].sum()}])
+                            save_persisted_df(pd.concat([abs_df, new_abs], ignore_index=True), "absorption_history")
+                        
+                        # 2. Update OI Snapshots
+                        oi_snap = get_persisted_df("oi_snapshots", ["Date", "Timestamp", "Strike", "CE_OI", "PE_OI", "CE_LTP", "PE_LTP"])
+                        if oi_snap.empty or (now_ts - oi_snap["Timestamp"].max() >= 60):
+                            new_snap = df_oc[["Strike", "CE_OI", "PE_OI", "CE_LTP", "PE_LTP"]].copy()
+                            new_snap["Timestamp"] = now_ts; new_snap["Date"] = today_str
+                            save_persisted_df(pd.concat([oi_snap, new_snap], ignore_index=True), "oi_snapshots")
+                except: pass
+            time.sleep(60) # Run every 60 seconds
+    
+    threading.Thread(target=daemon_loop, daemon=True).start()
+    return True
 
 # ---------------------------------------------------------
 # 4. BLACK-SCHOLES GREEK ENGINE (Nifty 65 Precision)
@@ -382,41 +428,6 @@ def fetch_multi_expiry_vol_structure(spot_price, valid_exp_list):
             fwd_vols.append(math.sqrt(max(var_diff, 0) / dt) * 100.0 if dt > 0 else v2 * 100.0)
         df_vol["Forward_Vol"] = fwd_vols
     return df_vol, df_surf
-
-
-# BACKGROUND DAEMON: Collects Data Even If Browser Is Closed
-@st.cache_resource
-def start_background_daemon(selected_expiry_daemon):
-    def daemon_loop():
-        while True:
-            now_ist = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5, minutes=30)))
-            m_open, m_close = now_ist.replace(hour=9, minute=15, second=0, microsecond=0), now_ist.replace(hour=15, minute=30, second=0, microsecond=0)
-            is_live = now_ist.weekday() < 5 and (m_open <= now_ist <= m_close)
-            
-            if is_live:
-                try:
-                    df_oc, spot_pr, _ = fetch_gex_option_chain(selected_expiry_daemon)
-                    if df_oc is not None and not df_oc.empty:
-                        now_ts = int(time.time())
-                        today_str = now_ist.strftime("%Y-%m-%d")
-                        
-                        # 1. Update Absorption Memory
-                        abs_df = get_persisted_df("absorption_history", ["Date", "Timestamp", "Spot", "Fut_LTP", "CE_OI", "PE_OI", "CE_Vol", "PE_Vol"])
-                        if abs_df.empty or (now_ts - abs_df["Timestamp"].max() >= 60):
-                            new_abs = pd.DataFrame([{"Date": today_str, "Timestamp": now_ts, "Spot": spot_pr, "Fut_LTP": live_ws_data.get("NIFTY_FUT_LTP", spot_pr), "CE_OI": df_oc["CE_OI"].sum(), "PE_OI": df_oc["PE_OI"].sum(), "CE_Vol": df_oc["CE_Vol"].sum(), "PE_Vol": df_oc["PE_Vol"].sum()}])
-                            save_persisted_df(pd.concat([abs_df, new_abs], ignore_index=True), "absorption_history")
-                        
-                        # 2. Update OI Snapshots
-                        oi_snap = get_persisted_df("oi_snapshots", ["Date", "Timestamp", "Strike", "CE_OI", "PE_OI", "CE_LTP", "PE_LTP"])
-                        if oi_snap.empty or (now_ts - oi_snap["Timestamp"].max() >= 60):
-                            new_snap = df_oc[["Strike", "CE_OI", "PE_OI", "CE_LTP", "PE_LTP"]].copy()
-                            new_snap["Timestamp"] = now_ts; new_snap["Date"] = today_str
-                            save_persisted_df(pd.concat([oi_snap, new_snap], ignore_index=True), "oi_snapshots")
-                except: pass
-            time.sleep(60) # Run every 60 seconds
-    
-    threading.Thread(target=daemon_loop, daemon=True).start()
-    return True
 
 
 # ---------------------------------------------------------
