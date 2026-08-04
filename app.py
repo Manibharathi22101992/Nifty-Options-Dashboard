@@ -120,7 +120,7 @@ if not CLIENT_ID or not ACCESS_TOKEN:
     st.stop()
 
 NIFTY_LOT_SIZE = 65
-NIFTY_DIVIDEND_YIELD = 0.012  # Proper 1.2% Nifty Dividend Yield
+NIFTY_DIVIDEND_YIELD = 0.012  
 PLOT_CONFIG = {'displayModeBar': True, 'scrollZoom': False}
 
 def fmt_num(val):
@@ -165,11 +165,39 @@ def get_oi_build_status(dl_p, dl_oi, is_call):
         elif dl_p < 0 and dl_oi < 0: return "Long Unwind", "rgba(0, 230, 118, 0.15)", "#00E676", 1
         else: return "Neutral", "rgba(138, 147, 166, 0.15)", "#8A93A6", 0
 
+def send_telegram_alert(message: str):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID: return
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    try: requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}, timeout=3)
+    except: pass
+
+def process_camarilla_alerts(df_camarilla, is_market_live, today_date_str):
+    if not is_market_live: return
+    if "telegram_cooldowns" not in st.session_state: st.session_state["telegram_cooldowns"] = {}
+    
+    for _, row in df_camarilla.iterrows():
+        sym = row["Symbol"]
+        w = row["Weight"]
+        ltp = row["LTP"]
+        
+        if row["Dist_S3_%"] <= 0.15:
+            key = f"{sym}_S3"
+            if st.session_state["telegram_cooldowns"].get(key) != today_date_str:
+                msg = f"🟢 *CAMARILLA S3 TESTED*\n\n*Stock:* `{sym}` (Weight: {w}%)\n*LTP:* ₹{ltp:,.2f} | *S3:* ₹{row['S3']:,.2f}\n*Distance:* `{row['Dist_S3_%']:.2f}%`\n\n⚡ *Nifty Support / Rebound Candidate*"
+                send_telegram_alert(msg)
+                st.session_state["telegram_cooldowns"][key] = today_date_str
+                
+        elif row["Dist_R3_%"] <= 0.15:
+            key = f"{sym}_R3"
+            if st.session_state["telegram_cooldowns"].get(key) != today_date_str:
+                msg = f"🔴 *CAMARILLA R3 TESTED*\n\n*Stock:* `{sym}` (Weight: {w}%)\n*LTP:* ₹{ltp:,.2f} | *R3:* ₹{row['R3']:,.2f}\n*Distance:* `{row['Dist_R3_%']:.2f}%`\n\n⚠️ *Nifty Resistance / Rejection Candidate*"
+                send_telegram_alert(msg)
+                st.session_state["telegram_cooldowns"][key] = today_date_str
+
 # ---------------------------------------------------------
-# 3. GREEK ENGINE (Corrected for Dividends & Accurate Formulas)
+# 3. GREEK ENGINE (Corrected for Dividends)
 # ---------------------------------------------------------
 def calculate_bs_greeks(S, K, T, sigma, r=0.07, q=NIFTY_DIVIDEND_YIELD):
-    """Computes all exact Black-Scholes Greeks including proper dividend yield discounting."""
     if T <= 1e-5 or sigma <= 1e-4 or S <= 0 or K <= 0: 
         return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
     try:
@@ -188,14 +216,10 @@ def calculate_bs_greeks(S, K, T, sigma, r=0.07, q=NIFTY_DIVIDEND_YIELD):
         
         vanna = -exp_qT * pdf_d1 * d2 / sigma
         
-        # Charm (Delta decay)
         ce_charm = q * exp_qT * cdf_d1 - exp_qT * pdf_d1 * (2 * (r - q) * T - d2 * sigma * math.sqrt(T)) / (2 * T * sigma * math.sqrt(T))
         pe_charm = ce_charm - q * exp_qT
         
-        # Corrected Speed Formula
         speed = -exp_qT * pdf_d1 / (S**2 * sigma * math.sqrt(T)) * (1.0 + d1 / (sigma * math.sqrt(T)))
-        
-        # Vomma (Vega Convexity)
         vomma = vega * d1 * d2 / sigma
         
         return ce_delta, pe_delta, gamma, vega, vanna, ce_charm, pe_charm, speed, vomma
@@ -237,7 +261,6 @@ def fetch_gex_option_chain_raw(expiry_date):
             ce, pe = details.get("ce", {}), details.get("pe", {})
             
             ce_oi, pe_oi = float(ce.get("oi", 0)), float(pe.get("oi", 0))
-            # Fallbacks for exact OI difference logic
             ce_prev = float(ce.get("previous_oi") if ce.get("previous_oi") is not None else ce_oi)
             pe_prev = float(pe.get("previous_oi") if pe.get("previous_oi") is not None else pe_oi)
             
@@ -251,6 +274,13 @@ def fetch_gex_option_chain_raw(expiry_date):
             ce_delta, _, ce_gamma, ce_vega, ce_vanna, ce_charm, _, ce_speed, ce_vomma = calculate_bs_greeks(spot_price, strike, T_years, max(ce_iv, 0.01))
             _, pe_delta, pe_gamma, pe_vega, pe_vanna, _, pe_charm, pe_speed, pe_vomma = calculate_bs_greeks(spot_price, strike, T_years, max(pe_iv, 0.01))
 
+            ce_vex = ce_oi * NIFTY_LOT_SIZE * ce_vanna * spot_price * 0.01 / 1e5
+            pe_vex = pe_oi * NIFTY_LOT_SIZE * pe_vanna * spot_price * 0.01 / 1e5
+            ce_chex = ce_oi * NIFTY_LOT_SIZE * ce_charm * (1.0/365.0) * spot_price / 1e5
+            pe_chex = pe_oi * NIFTY_LOT_SIZE * pe_charm * (1.0/365.0) * spot_price / 1e5
+            ce_spex = ce_oi * NIFTY_LOT_SIZE * ce_speed * (spot_price**3) * 0.0001 / 1e5
+            pe_spex = pe_oi * NIFTY_LOT_SIZE * pe_speed * (spot_price**3) * 0.0001 / 1e5
+
             records.append({
                 "Strike": strike, "CE_LTP": ce_ltp, "PE_LTP": pe_ltp, "CE_OI": ce_oi, "PE_OI": pe_oi, 
                 "CE_OI_Chg": ce_oichg, "PE_OI_Chg": pe_oichg, "CE_Vol": ce_vol, "PE_Vol": pe_vol,
@@ -260,12 +290,9 @@ def fetch_gex_option_chain_raw(expiry_date):
                 "ABS_DEX": (abs(ce_oi * ce_delta) + abs(pe_oi * pe_delta)) * NIFTY_LOT_SIZE * spot_price / 1e5,
                 "Call_GEX": ce_oi * NIFTY_LOT_SIZE * ce_gamma * (spot_price**2) * 0.01 / 1e5,
                 "Put_GEX": -pe_oi * NIFTY_LOT_SIZE * pe_gamma * (spot_price**2) * 0.01 / 1e5,
-                "CE_VEX": ce_oi * NIFTY_LOT_SIZE * ce_vanna * spot_price * 0.01 / 1e5,
-                "PE_VEX": pe_oi * NIFTY_LOT_SIZE * pe_vanna * spot_price * 0.01 / 1e5,
-                "CE_CHEX": ce_oi * NIFTY_LOT_SIZE * ce_charm * (1.0/365.0) * spot_price / 1e5,
-                "PE_CHEX": pe_oi * NIFTY_LOT_SIZE * pe_charm * (1.0/365.0) * spot_price / 1e5,
-                "CE_SPEX": ce_oi * NIFTY_LOT_SIZE * ce_speed * (spot_price**3) * 0.0001 / 1e5,
-                "PE_SPEX": pe_oi * NIFTY_LOT_SIZE * pe_speed * (spot_price**3) * 0.0001 / 1e5,
+                "CE_VEX": ce_vex, "PE_VEX": pe_vex, "Net_VEX": ce_vex - pe_vex,
+                "CE_CHEX": ce_chex, "PE_CHEX": pe_chex, "Net_CHEX": ce_chex - pe_chex,
+                "CE_SPEX": ce_spex, "PE_SPEX": pe_spex, "Net_SPEX": ce_spex - pe_spex,
                 "CE_Vega": ce_vega * ce_oi * NIFTY_LOT_SIZE, "PE_Vega": pe_vega * pe_oi * NIFTY_LOT_SIZE,
                 "CE_Vomma": ce_vomma * ce_oi * NIFTY_LOT_SIZE, "PE_Vomma": pe_vomma * pe_oi * NIFTY_LOT_SIZE,
                 "CE_IV": ce_iv * 100.0, "PE_IV": pe_iv * 100.0, "IV_Spread": (ce_iv * 100.0) - (pe_iv * 100.0),
@@ -291,7 +318,7 @@ def fetch_gex_option_chain(expiry_date):
 def fetch_multi_expiry_vol_structure(spot_price, valid_exp_list):
     vol_data, surface_data = [], []
     for idx, exp in enumerate(valid_exp_list):
-        if idx > 0: time.sleep(3.2) # Hard lock 3.2s to bypass Dhan rate limits
+        if idx > 0: time.sleep(3.2)
         df_exp, exp_spot, _ = fetch_gex_option_chain_raw(exp)
         if df_exp is not None and not df_exp.empty:
             temp_spot_atm = int(round(exp_spot / 50) * 50)
@@ -337,6 +364,43 @@ def check_and_reset(df_name, cols, today_date_str, now_time_str):
         df = pd.DataFrame(columns=cols)
         save_persisted_df(df, df_name)
     return df
+
+@st.cache_data(ttl=60)
+def get_nifty50_camarilla():
+    if not YF_AVAILABLE: return pd.DataFrame()
+    tickers = list(NIFTY_50_WEIGHTS.keys())
+    try:
+        data = yf.download(tickers, period="5d", interval="1d", group_by='ticker', auto_adjust=False, progress=False)
+    except Exception:
+        return pd.DataFrame(columns=["Symbol", "Weight", "LTP", "S3", "R3", "Dist_S3_%", "Dist_R3_%"])
+    
+    records = []
+    today = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5, minutes=30))).date()
+    
+    for ticker in tickers:
+        try:
+            df_t = data[ticker].dropna() if isinstance(data.columns, pd.MultiIndex) else data.dropna()
+            if len(df_t) >= 2:
+                last_date = df_t.index[-1].date()
+                prev_idx = -2 if last_date == today else -1
+                
+                prev_h = df_t.iloc[prev_idx]['High']
+                prev_l = df_t.iloc[prev_idx]['Low']
+                prev_c = df_t.iloc[prev_idx]['Close']
+                ltp = df_t.iloc[-1]['Close']
+                
+                r_hl = prev_h - prev_l
+                r3 = prev_c + (r_hl * 1.1 / 4)
+                s3 = prev_c - (r_hl * 1.1 / 4)
+                records.append({
+                    "Symbol": ticker.replace(".NS", ""), "Weight": NIFTY_50_WEIGHTS[ticker],
+                    "LTP": float(ltp), "S3": float(s3), "R3": float(r3),
+                    "Dist_S3_%": float(abs(ltp - s3) / s3 * 100), "Dist_R3_%": float(abs(ltp - r3) / r3 * 100)
+                })
+        except: pass
+    df_cam = pd.DataFrame(records)
+    if not df_cam.empty and "Weight" in df_cam.columns: return df_cam.sort_values("Weight", ascending=False)
+    return pd.DataFrame(columns=["Symbol", "Weight", "LTP", "S3", "R3", "Dist_S3_%", "Dist_R3_%"])
 
 # SINGLETON BACKGROUND DAEMON
 @st.cache_resource
@@ -535,6 +599,7 @@ today_snaps = oi_snap[oi_snap["Date"] == today_date_str]
 if not today_snaps.empty:
     first_ts = today_snaps["Timestamp"].min()
     first_snap = today_snaps[today_snaps["Timestamp"] == first_ts]
+    # Map the very first snapshot of the day to compute precise absolute change
     df_filtered["CE_OI_Chg_Calc"] = df_filtered["CE_OI"] - df_filtered["Strike"].map(first_snap.set_index("Strike")["CE_OI"]).fillna(df_filtered["CE_OI"])
     df_filtered["PE_OI_Chg_Calc"] = df_filtered["PE_OI"] - df_filtered["Strike"].map(first_snap.set_index("Strike")["PE_OI"]).fillna(df_filtered["PE_OI"])
     tot_ce_oichg, tot_pe_oichg = df_filtered["CE_OI_Chg_Calc"].sum(), df_filtered["PE_OI_Chg_Calc"].sum()
@@ -571,19 +636,21 @@ h6.plotly_chart(create_h_bar("Gamma Exp (GEX)", tot_put_gex, tot_call_gex, gex_i
 # ---------------------------------------------------------
 # 9. MASTER TAB INTERFACE
 # ---------------------------------------------------------
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "👑 Prince Analysis",
     "🛡️ Greek Exposure Profiles", 
     "🚀 Intraday & Advanced Analytics", 
     "📈 OpenBull & Fyers Skew", 
     "📊 Options Chain Grid",
-    "🎯 Nifty 50 Camarilla Radar"
+    "🎯 Nifty 50 Camarilla Radar",
+    "⚠️ System Health & Logs"
 ])
 
 with tab1: # PRINCE ANALYSIS
     v1, v2 = st.columns(2)
     with v1:
         st.markdown('<div class="chart-container"><div class="chart-title">Forward Vol Term Structure (Active + 3 Expiries)</div>', unsafe_allow_html=True)
+        # Guarantees the selected expiry is parsed as first element
         exp_list = [selected_expiry] + [x for x in valid_expiries if x != selected_expiry][:3]
         df_vol_struct, df_surface = fetch_multi_expiry_vol_structure(spot_price, exp_list)
         
@@ -933,4 +1000,13 @@ with tab6: # NIFTY 50 CAMARILLA RADAR
             else: st.info("No Nifty 50 constituents currently testing R3 Resistance.")
     else:
         st.warning("Fetching Nifty 50 OHLC data. Please wait...")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+with tab7: # ERROR LOGS & DIAGNOSTICS
+    st.markdown('<div class="chart-container"><div class="chart-title">Background Diagnostic Logs</div>', unsafe_allow_html=True)
+    if len(GLOBAL_STATE["errors"]) == 0:
+        st.success("✅ System Health is Optimal. 0 Critical Exceptions recorded in session.")
+    else:
+        for err in GLOBAL_STATE["errors"]:
+            st.markdown(f"<div style='color:var(--red); font-family:monospace; padding:5px; border-bottom:1px solid #2A2E39;'>{err}</div>", unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
