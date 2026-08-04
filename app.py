@@ -14,20 +14,40 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
 # ---------------------------------------------------------
-# 0. GLOBAL SINGLETON STATE (Prevents Thread Leaks)
+# 0. THREAD-SAFE SINGLETON STATE
 # ---------------------------------------------------------
-if "GLOBAL_STATE" not in globals():
-    GLOBAL_STATE = {
-        "selected_expiry": None,
-        "errors": collections.deque(maxlen=15),
-        "api_latency": 0.0,
-        "last_ws_tick": 0.0,
-        "daemon_alive": False
-    }
+class SingletonState:
+    _instance = None
+    _lock = threading.Lock()
+
+    def __new__(cls):
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = super(SingletonState, cls).__new__(cls)
+                cls._instance.state = {
+                    "selected_expiry": None,
+                    "errors": collections.deque(maxlen=15),
+                    "api_latency": 0.0,
+                    "last_ws_tick": 0.0,
+                    "daemon_alive": False
+                }
+            return cls._instance
+            
+    def get(self, key):
+        with self._lock:
+            return self.state.get(key)
+            
+    def set(self, key, value):
+        with self._lock:
+            self.state[key] = value
+
+GLOBAL_STATE = SingletonState()
 
 def log_error(msg):
     ts = datetime.datetime.now().strftime('%H:%M:%S')
-    GLOBAL_STATE["errors"].appendleft(f"[{ts}] {msg}")
+    errors = GLOBAL_STATE.get("errors")
+    errors.appendleft(f"[{ts}] {msg}")
+    GLOBAL_STATE.set("errors", errors)
 
 # Graceful fallbacks
 try:
@@ -45,64 +65,87 @@ except Exception as e:
     log_error(f"yFinance Import Failed: {e}")
 
 # ---------------------------------------------------------
-# 1. PAGE SETUP & DESIGN TOKENS
+# 1. PAGE SETUP & GLASSMORPHISM DESIGN TOKENS
 # ---------------------------------------------------------
-st.set_page_config(page_title="Prince PAX Dashboard | Volatility Desk", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Prince PAX Pro | Volatility Desk", layout="wide", initial_sidebar_state="expanded")
 
 st.markdown(
     """
     <style>
     :root {
-        --bg: #0A0A0A;
-        --panel: #14151A;
-        --border: #2A2E39;
+        --bg: #050505;
+        --panel: #0F1115;
+        --panel-glass: rgba(15, 17, 21, 0.75);
+        --border: #1E222D;
         --green: #00E676;
         --red: #FF5252;
         --amber: #FFD700;
         --blue: #29B6F6;
-        --text-main: #FFFFFF;
+        --purple: #AB47BC;
+        --text-main: #F8F9FA;
         --text-muted: #8A93A6;
     }
     
-    html, body { overflow-x: hidden; -webkit-overflow-scrolling: touch; background-color: var(--bg); color: var(--text-main); font-family: 'Inter', sans-serif; }
+    html, body { overflow-x: hidden; -webkit-overflow-scrolling: touch; background-color: var(--bg); color: var(--text-main); font-family: 'Inter', system-ui, sans-serif; }
     .stApp { background-color: var(--bg); overflow-x: hidden; }
-    section[data-testid="stSidebar"] { background-color: #111115 !important; border-right: 1px solid var(--border); }
+    section[data-testid="stSidebar"] { background-color: #0A0A0C !important; border-right: 1px solid var(--border); }
+    
+    .glass-panel {
+        background: var(--panel-glass);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 20px;
+        box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+        margin-bottom: 20px;
+    }
     
     .health-strip {
         display: flex; justify-content: space-between; align-items: center;
-        background: var(--panel); padding: 8px 16px; border-radius: 6px; 
-        border: 1px solid var(--border); font-size: 0.8rem; font-weight: 600; margin-bottom: 15px;
+        background: rgba(30, 34, 45, 0.5); padding: 12px 20px; border-radius: 8px; 
+        border: 1px solid var(--border); font-size: 0.85rem; font-weight: 600; margin-bottom: 20px;
+        backdrop-filter: blur(5px);
     }
     
     .hero-banner {
-        background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 20px;
-        text-align: center; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.6); margin-bottom: 20px;
-        border-top: 4px solid var(--amber);
+        background: linear-gradient(135deg, rgba(15, 17, 21, 0.9) 0%, rgba(30, 34, 45, 0.7) 100%);
+        border: 1px solid var(--border); border-radius: 16px; padding: 30px;
+        text-align: center; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5); margin-bottom: 25px;
+        border-top: 3px solid var(--amber); position: relative; overflow: hidden;
     }
+    .hero-banner::before {
+        content: ''; position: absolute; top: -50%; left: -50%; width: 200%; height: 200%;
+        background: radial-gradient(circle, rgba(255, 215, 0, 0.05) 0%, transparent 70%);
+        animation: rotate 20s linear infinite;
+    }
+    @keyframes rotate { 100% { transform: rotate(360deg); } }
     
-    .chart-container {
-        background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 14px;
-        margin-bottom: 16px; position: relative;
-    }
     .chart-title {
-        font-size: 0.85rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase;
-        margin-bottom: 10px; border-bottom: 1px solid var(--border); padding-bottom: 6px;
+        font-size: 0.9rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase;
+        letter-spacing: 1px; margin-bottom: 15px; padding-bottom: 8px; border-bottom: 1px solid var(--border);
     }
 
     .interp-box {
-        background-color: #121824; border-left: 3px solid var(--blue); padding: 8px 12px;
-        font-size: 0.8rem; color: var(--text-main); margin-bottom: 10px; border-radius: 0 4px 4px 0; line-height: 1.4;
+        background-color: rgba(41, 182, 246, 0.08); border-left: 4px solid var(--blue); padding: 12px 16px;
+        font-size: 0.85rem; color: var(--text-main); margin-bottom: 15px; border-radius: 0 8px 8px 0; line-height: 1.5;
     }
 
-    div[data-testid="stTabs"] button { color: var(--text-muted); font-weight: 600; font-size: 0.95rem; }
+    div[data-testid="stTabs"] button { color: var(--text-muted); font-weight: 600; font-size: 1rem; }
     div[data-testid="stTabs"] button[aria-selected="true"] { color: var(--green); border-bottom-color: var(--green); }
 
-    .data-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; text-align: right; }
-    .data-table th { background-color: #1e2638; color: #8b9bb4; padding: 8px; border: 1px solid var(--border); text-align: right;}
+    .data-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; text-align: right; }
+    .data-table th { background-color: #1E2638; color: #8b9bb4; padding: 10px; border: 1px solid var(--border); text-align: right;}
     .data-table th.center { text-align: center; }
-    .data-table td { padding: 8px; border: 1px solid var(--border); color: var(--text-main); }
-    .row-atm { background-color: rgba(41, 182, 246, 0.12); border-left: 3px solid var(--blue);}
-    .tag-badge { padding: 4px 8px; border-radius: 4px; font-weight: 700; font-size: 0.7rem; display: inline-block; text-align: center; width: 100px;}
+    .data-table td { padding: 10px; border: 1px solid var(--border); color: var(--text-main); }
+    .row-atm { background-color: rgba(41, 182, 246, 0.15); border-left: 4px solid var(--blue);}
+    .tag-badge { padding: 5px 10px; border-radius: 6px; font-weight: 700; font-size: 0.75rem; display: inline-block; text-align: center; min-width: 110px;}
+    
+    .metric-card {
+        background: var(--panel-glass); border: 1px solid var(--border); border-radius: 10px; padding: 15px; text-align: center;
+    }
+    .metric-value { font-size: 1.8rem; font-weight: 800; color: var(--text-main); margin: 5px 0; }
+    .metric-label { font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px; }
     </style>
     """, unsafe_allow_html=True
 )
@@ -121,9 +164,8 @@ if not CLIENT_ID or not ACCESS_TOKEN:
 
 NIFTY_LOT_SIZE = 65
 NIFTY_DIVIDEND_YIELD = 0.012  
-PLOT_CONFIG = {'displayModeBar': True, 'scrollZoom': False}
+PLOT_CONFIG = {'displayModeBar': False, 'scrollZoom': False}
 
-# RESTORED NIFTY 50 WEIGHTS DICTIONARY
 NIFTY_50_WEIGHTS = {
     "HDFCBANK.NS": 11.6, "RELIANCE.NS": 9.8, "ICICIBANK.NS": 7.9, "INFY.NS": 5.8, "ITC.NS": 4.5,
     "TCS.NS": 4.1, "LT.NS": 3.4, "AXISBANK.NS": 3.2, "KOTAKBANK.NS": 2.8, "SBIN.NS": 2.7,
@@ -147,9 +189,12 @@ def fmt_num(val):
     return f"{sign}{abs_val:.0f}"
 
 def apply_dark_layout(fig, height=250, is_strike_axis=False, df_filtered=None, atm_strike=None):
-    fig.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", margin=dict(l=5, r=5, t=10, b=5), height=height, legend=dict(orientation="h", y=1.1, x=0, font=dict(size=10)))
+    fig.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", 
+                      margin=dict(l=5, r=5, t=10, b=5), height=height, 
+                      legend=dict(orientation="h", y=1.1, x=0, font=dict(size=10)))
     if is_strike_axis and df_filtered is not None and not df_filtered.empty and atm_strike is not None:
-        fig.update_xaxes(tickmode='array', tickvals=df_filtered["Strike"], ticktext=df_filtered["Strike"].astype(str).tolist(), tickangle=-45, gridcolor="#2A2E39", zerolinecolor="#2A2E39", tickfont=dict(size=10, color="#D1D4DC"))
+        fig.update_xaxes(tickmode='array', tickvals=df_filtered["Strike"], ticktext=df_filtered["Strike"].astype(str).tolist(), 
+                         tickangle=-45, gridcolor="#2A2E39", zerolinecolor="#2A2E39", tickfont=dict(size=10, color="#D1D4DC"))
     else:
         fig.update_xaxes(gridcolor="#2A2E39", zerolinecolor="#2A2E39", tickfont=dict(size=10))
     fig.update_yaxes(gridcolor="#2A2E39", zerolinecolor="#2A2E39", tickfont=dict(size=10))
@@ -194,7 +239,6 @@ def process_camarilla_alerts(df_camarilla, is_market_live, today_date_str):
         w = row["Weight"]
         ltp = row["LTP"]
         
-        # 1 Alert per day per level per stock
         if row["Dist_S3_%"] <= 0.15:
             key = f"{sym}_S3"
             if st.session_state["telegram_cooldowns"].get(key) != today_date_str:
@@ -210,31 +254,38 @@ def process_camarilla_alerts(df_camarilla, is_market_live, today_date_str):
                 st.session_state["telegram_cooldowns"][key] = today_date_str
 
 # ---------------------------------------------------------
-# 3. GREEK ENGINE
+# 3. CORRECTED GREEK ENGINE
 # ---------------------------------------------------------
 def calculate_bs_greeks(S, K, T, sigma, r=0.07, q=NIFTY_DIVIDEND_YIELD):
-    if T <= 1e-5 or sigma <= 1e-4 or S <= 0 or K <= 0: return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+    if T <= 1e-5 or sigma <= 1e-4 or S <= 0 or K <= 0: return [0.0] * 9
     try:
-        d1 = (math.log(S / K) + (r - q + 0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
-        d2 = d1 - sigma * math.sqrt(T)
-        pdf_d1 = (1.0 / math.sqrt(2 * math.pi)) * math.exp(-0.5 * d1 * d1)
+        sqrt_T = math.sqrt(T)
+        d1 = (math.log(S / K) + (r - q + 0.5 * sigma**2) * T) / (sigma * sqrt_T)
+        d2 = d1 - sigma * sqrt_T
+        
+        pdf_d1 = math.exp(-0.5 * d1**2) / math.sqrt(2 * math.pi)
         cdf_d1 = 0.5 * (1.0 + math.erf(d1 / math.sqrt(2.0)))
+        
         exp_qT = math.exp(-q * T)
         
         ce_delta = exp_qT * cdf_d1
         pe_delta = exp_qT * (cdf_d1 - 1.0)
-        gamma = exp_qT * pdf_d1 / (S * sigma * math.sqrt(T))
-        vega = S * exp_qT * pdf_d1 * math.sqrt(T) / 100.0  
+        gamma = exp_qT * pdf_d1 / (S * sigma * sqrt_T)
+        vega = S * exp_qT * pdf_d1 * sqrt_T / 100.0  
+        
         vanna = -exp_qT * pdf_d1 * d2 / sigma
-        ce_charm = q * exp_qT * cdf_d1 - exp_qT * pdf_d1 * (2 * (r - q) * T - d2 * sigma * math.sqrt(T)) / (2 * T * sigma * math.sqrt(T))
-        pe_charm = ce_charm - q * exp_qT
-        speed = -exp_qT * pdf_d1 / (S**2 * sigma * math.sqrt(T)) * (1.0 + d1 / (sigma * math.sqrt(T)))
         vomma = vega * d1 * d2 / sigma
+        speed = -gamma / S * (d1 / (sigma * sqrt_T) + 1.0)
+        
+        # Corrected Charm (dDelta/dT)
+        d1_dT = (2 * (r - q) * T - d2 * sigma * sqrt_T) / (2 * T * sigma * sqrt_T)
+        ce_charm = -q * exp_qT * cdf_d1 + exp_qT * pdf_d1 * d1_dT
+        pe_charm = ce_charm + q * exp_qT  # Corrected sign for Put Charm
         
         return ce_delta, pe_delta, gamma, vega, vanna, ce_charm, pe_charm, speed, vomma
     except Exception as e:
         log_error(f"Greek Calc Error: {e}")
-        return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+        return [0.0] * 9
 
 # ---------------------------------------------------------
 # 4. DATA API & DAEMON ENGINE
@@ -245,7 +296,7 @@ def fetch_gex_option_chain_raw(expiry_date):
     start_time = time.time()
     try:
         res = requests.post(url, headers=headers, json={"UnderlyingScrip": 13, "UnderlyingSeg": "IDX_I", "Expiry": expiry_date}, timeout=8)
-        GLOBAL_STATE["api_latency"] = round((time.time() - start_time) * 1000, 2)
+        GLOBAL_STATE.set("api_latency", round((time.time() - start_time) * 1000, 2))
         if res.status_code != 200: return None, 0.0, f"HTTP Error {res.status_code}"
         data = res.json()
         if data.get("status") != "success": return None, 0.0, str(data.get("remarks") or data.get("message") or "API Returned Fail")
@@ -318,7 +369,7 @@ def fetch_gex_option_chain(expiry_date):
 def fetch_multi_expiry_vol_structure(spot_price, valid_exp_list):
     vol_data, surface_data = [], []
     for idx, exp in enumerate(valid_exp_list):
-        if idx > 0: time.sleep(3.2)
+        if idx > 0: time.sleep(1.5) # Reduced sleep to prevent excessive blocking
         df_exp, exp_spot, _ = fetch_gex_option_chain_raw(exp)
         if df_exp is not None and not df_exp.empty:
             temp_spot_atm = int(round(exp_spot / 50) * 50)
@@ -361,7 +412,7 @@ def check_and_reset(df_name, cols, today_date_str, now_time_str):
         save_persisted_df(df, df_name)
     return df
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=300)
 def get_nifty50_camarilla():
     if not YF_AVAILABLE: return pd.DataFrame()
     tickers = list(NIFTY_50_WEIGHTS.keys())
@@ -394,18 +445,17 @@ def get_nifty50_camarilla():
     if not df_cam.empty and "Weight" in df_cam.columns: return df_cam.sort_values("Weight", ascending=False)
     return pd.DataFrame(columns=["Symbol", "Weight", "LTP", "S3", "R3", "Dist_S3_%", "Dist_R3_%"])
 
-# SINGLETON BACKGROUND DAEMON
 @st.cache_resource
 def start_background_daemon():
     def daemon_loop():
         while True:
-            GLOBAL_STATE["daemon_alive"] = True
+            GLOBAL_STATE.set("daemon_alive", True)
             now_ist = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5, minutes=30)))
             m_open, m_close = now_ist.replace(hour=9, minute=15, second=0, microsecond=0), now_ist.replace(hour=15, minute=30, second=0, microsecond=0)
             
             if now_ist.weekday() < 5 and (m_open <= now_ist <= m_close):
                 try:
-                    exp = GLOBAL_STATE["selected_expiry"]
+                    exp = GLOBAL_STATE.get("selected_expiry")
                     if exp:
                         df_oc, spot_pr, _ = fetch_gex_option_chain_raw(exp)
                         if df_oc is not None and not df_oc.empty:
@@ -426,12 +476,6 @@ def start_background_daemon():
                             if abs_df.empty or (now_ts - abs_df["Timestamp"].max() >= 60):
                                 new_abs = pd.DataFrame([{"Date": today_str, "Timestamp": now_ts, "Spot": spot_pr, "Fut_LTP": synth_fut, "CE_OI": df_oc["CE_OI"].sum(), "PE_OI": df_oc["PE_OI"].sum(), "CE_Vol": df_oc["CE_Vol"].sum(), "PE_Vol": df_oc["PE_Vol"].sum()}])
                                 save_persisted_df(pd.concat([abs_df, new_abs], ignore_index=True), "absorption_history")
-                            
-                            oi_snap = get_persisted_df("oi_snapshots", ["Date", "Timestamp", "Strike", "CE_OI", "PE_OI", "CE_LTP", "PE_LTP"])
-                            if oi_snap.empty or (now_ts - oi_snap["Timestamp"].max() >= 60):
-                                new_snap = df_oc[["Strike", "CE_OI", "PE_OI", "CE_LTP", "PE_LTP"]].copy()
-                                new_snap["Timestamp"] = now_ts; new_snap["Date"] = today_str
-                                save_persisted_df(pd.concat([oi_snap, new_snap], ignore_index=True), "oi_snapshots")
                 except Exception as e: 
                     log_error(f"Daemon execution failed: {e}")
             time.sleep(60) 
@@ -458,7 +502,7 @@ except Exception as e:
 
 selected_expiry = st.sidebar.selectbox("Primary Expiry", valid_expiries) if valid_expiries else st.sidebar.date_input("Primary Expiry").strftime("%Y-%m-%d")
 
-GLOBAL_STATE["selected_expiry"] = selected_expiry
+GLOBAL_STATE.set("selected_expiry", selected_expiry)
 start_background_daemon()
 
 df_oc, spot_price, error_remark = fetch_gex_option_chain(selected_expiry)
@@ -486,14 +530,14 @@ if st.sidebar.button("🗑️ Reset Session Cache"):
 # ---------------------------------------------------------
 # 6. ENGINE HEALTH STRIP
 # ---------------------------------------------------------
-st.markdown("### PRINCE PAX DASHBOARD")
+st.markdown("### PRINCE PAX PRO DASHBOARD")
 health_html = f"""
 <div class='health-strip'>
     <div>🔌 Status: <span style='color:{"var(--green)" if is_market_live else "var(--amber)"};'>{"LIVE" if is_market_live else "CLOSED"}</span></div>
     <div>🎯 Expiry: <span style='color:var(--text-main);'>{selected_expiry}</span></div>
-    <div>⚡ Latency: <span style='color:{"var(--green)" if GLOBAL_STATE["api_latency"]<500 else "var(--amber)"};'>{GLOBAL_STATE["api_latency"]} ms</span></div>
-    <div>🤖 Daemon: <span style='color:{"var(--green)" if GLOBAL_STATE["daemon_alive"] else "var(--red)"};'>{"ACTIVE" if GLOBAL_STATE["daemon_alive"] else "INACTIVE"}</span></div>
-    <div>⚠️ Errors: <span style='color:{"var(--red)" if len(GLOBAL_STATE["errors"])>0 else "var(--green)"};'>{len(GLOBAL_STATE["errors"])}</span></div>
+    <div>⚡ Latency: <span style='color:{"var(--green)" if GLOBAL_STATE.get("api_latency")<500 else "var(--amber)"};'>{GLOBAL_STATE.get("api_latency")} ms</span></div>
+    <div>🤖 Daemon: <span style='color:{"var(--green)" if GLOBAL_STATE.get("daemon_alive") else "var(--red)"};'>{"ACTIVE" if GLOBAL_STATE.get("daemon_alive") else "INACTIVE"}</span></div>
+    <div>⚠️ Errors: <span style='color:{"var(--red)" if len(GLOBAL_STATE.get("errors"))>0 else "var(--green)"};'>{len(GLOBAL_STATE.get("errors"))}</span></div>
 </div>
 """
 st.markdown(health_html, unsafe_allow_html=True)
@@ -533,10 +577,8 @@ for i in range(1, len(df_sorted)):
         else: gamma_flip_strike = (x1 + x2) / 2.0
         break
 
-# Compute Max Pain for Memory
 max_pain_strike = atm_strike
 pain_records = [{"Strike": k, "Writer_Loss": (df_oc["CE_OI"] * (k - df_oc["Strike"]).clip(lower=0)).sum() + (df_oc["PE_OI"] * (df_oc["Strike"] - k).clip(lower=0)).sum()} for k in df_oc["Strike"] if atm_strike - 1500 <= k <= atm_strike + 1500]
-df_pain = pd.DataFrame()
 if pain_records:
     df_pain_temp = pd.DataFrame(pain_records)
     max_pain_strike = df_pain_temp.loc[df_pain_temp["Writer_Loss"].idxmin()]["Strike"]
@@ -547,7 +589,6 @@ total_ce_oi_sum = df_oc["CE_OI"].sum()
 total_pe_oi_sum = df_oc["PE_OI"].sum()
 now_ts = int(time.time())
 
-# Update Memory Only When Valid
 if is_market_live:
     abs_df = st.session_state["absorption_history"]
     if abs_df.empty or (now_ts - abs_df["Timestamp"].max() >= 60):
@@ -611,7 +652,6 @@ if is_market_live:
         st.session_state["synth_history"] = pd.concat([synth_df, pd.DataFrame([{"Date": today_date_str, "Time": now_time_str, "Spot": spot_price, "Strike_M50": strike_m50, "Strike_ATM": atm_strike, "Strike_P50": strike_p50, "Synth_M50": s_m50, "Synth_ATM": s_atm, "Synth_P50": s_p50, "PCP_Dev_Mean": ((s_m50 - spot_price) + (s_atm - spot_price) + (s_p50 - spot_price)) / 3.0}])], ignore_index=True)
         save_persisted_df(st.session_state["synth_history"], "synth_history")
 
-# Load Memory explicitly for UI graphs
 abs_df = st.session_state["absorption_history"]
 oi_snap = st.session_state["oi_snapshots"]
 iv_hist = st.session_state["iv_spread_history"]
@@ -621,8 +661,24 @@ doi_df = st.session_state["delta_oi_history"]
 strad_df = st.session_state["straddle_history"]
 synth_df = st.session_state["synth_history"]
 
+# Expected Move Calculation (Based on ATM Straddle)
+r_atm_cur = df_oc[df_oc["Strike"] == atm_strike]
+atm_straddle = (r_atm_cur["CE_LTP"].values[0] if not r_atm_cur.empty else 0.0) + (r_atm_cur["PE_LTP"].values[0] if not r_atm_cur.empty else 0.0)
+expected_move = atm_straddle * 0.85  # Approx 1 SD expected move
+
 # PREMIUM HERO BANNER
-st.markdown(f'<div class="hero-banner"><div style="color:var(--text-muted); font-size:1.1rem; font-weight:800; letter-spacing:1px; margin-bottom:5px;">NIFTY SYNTHETIC FUTURE (IV WEIGHTED)</div><div style="color:var(--text-main); font-size:3.5rem; font-weight:900; letter-spacing:-1px; text-shadow: 0px 0px 10px rgba(255,255,255,0.1);">₹{synthetic_future:,.2f}</div><div style="color:var(--amber); font-size:1rem; font-weight:600; margin-top:5px;">Spot Market: ₹{spot_price:,.2f} &nbsp;&nbsp;|&nbsp;&nbsp; Interpolated Gamma Flip: {gamma_flip_strike:.1f}</div></div>', unsafe_allow_html=True)
+st.markdown(f'''
+<div class="hero-banner">
+    <div style="color:var(--text-muted); font-size:1.1rem; font-weight:800; letter-spacing:2px; margin-bottom:10px; position:relative; z-index:1;">NIFTY SYNTHETIC FUTURE (IV WEIGHTED)</div>
+    <div style="color:var(--text-main); font-size:4rem; font-weight:900; letter-spacing:-2px; text-shadow: 0px 0px 15px rgba(255,255,255,0.1); position:relative; z-index:1;">₹{synthetic_future:,.2f}</div>
+    <div style="color:var(--amber); font-size:1.1rem; font-weight:600; margin-top:10px; position:relative; z-index:1;">
+        Spot Market: ₹{spot_price:,.2f} &nbsp;&nbsp;|&nbsp;&nbsp; Gamma Flip: {gamma_flip_strike:.1f} &nbsp;&nbsp;|&nbsp;&nbsp; Max Pain: {max_pain_strike}
+    </div>
+    <div style="color:var(--blue); font-size:0.9rem; font-weight:600; margin-top:5px; position:relative; z-index:1;">
+        Expected Daily Move (1 SD): ± ₹{expected_move:,.1f}
+    </div>
+</div>
+''', unsafe_allow_html=True)
 
 # ---------------------------------------------------------
 # 8. AGGREGATE OPTIONS FLOW BAR
@@ -685,9 +741,10 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
 with tab1: # PRINCE ANALYSIS
     v1, v2 = st.columns(2)
     with v1:
-        st.markdown('<div class="chart-container"><div class="chart-title">Forward Vol Term Structure (Active + 3 Expiries)</div>', unsafe_allow_html=True)
+        st.markdown('<div class="glass-panel"><div class="chart-title">Forward Vol Term Structure (Active + 3 Expiries)</div>', unsafe_allow_html=True)
         exp_list = [selected_expiry] + [x for x in valid_expiries if x != selected_expiry][:3]
-        df_vol_struct, df_surface = fetch_multi_expiry_vol_structure(spot_price, exp_list)
+        with st.spinner("Loading Term Structure..."):
+            df_vol_struct, df_surface = fetch_multi_expiry_vol_structure(spot_price, exp_list)
         
         if not df_vol_struct.empty and len(df_vol_struct) >= 2:
             is_backwardation = df_vol_struct.iloc[0]["Mean_IV"] > df_vol_struct.iloc[-1]["Mean_IV"]
@@ -697,11 +754,11 @@ with tab1: # PRINCE ANALYSIS
             fig_fwd.add_trace(go.Scatter(x=df_vol_struct["Expiry"], y=df_vol_struct["Forward_Vol"], mode="lines+markers", name="Forward Vol", line=dict(color="#00E676", width=2.5)))
             fig_fwd.add_trace(go.Scatter(x=df_vol_struct["Expiry"], y=df_vol_struct["Mean_IV"], mode="lines+markers", name="Mean IV", line=dict(color="#AB47BC", width=2.5, dash="dot")))
             st.plotly_chart(apply_dark_layout(fig_fwd), use_container_width=True, config=PLOT_CONFIG)
-        else: st.info("Loading Term Structure Data... Bypassing API Rate Limits (Takes ~10 seconds)")
+        else: st.info("Loading Term Structure Data...")
         st.markdown('</div>', unsafe_allow_html=True)
         
     with v2:
-        st.markdown('<div class="chart-container"><div class="chart-title">ATM IV vs Nifty Spot Price</div>', unsafe_allow_html=True)
+        st.markdown('<div class="glass-panel"><div class="chart-title">ATM IV vs Nifty Spot Price</div>', unsafe_allow_html=True)
         st.markdown('<div class="interp-box">💡 <b>Interpretation:</b> Rising Spot + Falling IV indicates strong bullish momentum supported by volatility crush (favorable for short option structures).</div>', unsafe_allow_html=True)
         fig_iv_price = make_subplots(specs=[[{"secondary_y": True}]])
         if not iv_hist.empty:
@@ -716,7 +773,7 @@ with tab1: # PRINCE ANALYSIS
 
     oi_col1, oi_col2 = st.columns(2)
     with oi_col1:
-        st.markdown('<div class="chart-container"><div class="chart-title">OI Tracker (CE/PE Profile)</div>', unsafe_allow_html=True)
+        st.markdown('<div class="glass-panel"><div class="chart-title">OI Tracker (CE/PE Profile)</div>', unsafe_allow_html=True)
         fig_oi_prof = go.Figure()
         fig_oi_prof.add_trace(go.Bar(x=df_filtered["Strike"], y=df_filtered["PE_OI"], name="Put OI (PE)", marker_color="#FF5252"))
         fig_oi_prof.add_trace(go.Bar(x=df_filtered["Strike"], y=df_filtered["CE_OI"], name="Call OI (CE)", marker_color="#00E676"))
@@ -725,7 +782,7 @@ with tab1: # PRINCE ANALYSIS
         st.plotly_chart(apply_dark_layout(fig_oi_prof, 250, True, df_filtered, atm_strike), use_container_width=True, config=PLOT_CONFIG)
         st.markdown('</div>', unsafe_allow_html=True)
     with oi_col2:
-        st.markdown('<div class="chart-container"><div class="chart-title">OI Change Tracker (Full Day)</div>', unsafe_allow_html=True)
+        st.markdown('<div class="glass-panel"><div class="chart-title">OI Change Tracker (Full Day)</div>', unsafe_allow_html=True)
         fig_oichg_prof = go.Figure()
         fig_oichg_prof.add_trace(go.Bar(x=df_filtered["Strike"], y=df_filtered.get("PE_OI_Chg_Calc", df_filtered["PE_OI_Chg"]), name="Put OI Chg", marker_color="#FF5252"))
         fig_oichg_prof.add_trace(go.Bar(x=df_filtered["Strike"], y=df_filtered.get("CE_OI_Chg_Calc", df_filtered["CE_OI_Chg"]), name="Call OI Chg", marker_color="#00E676"))
@@ -734,7 +791,7 @@ with tab1: # PRINCE ANALYSIS
         st.plotly_chart(apply_dark_layout(fig_oichg_prof, 250, True, df_filtered, atm_strike), use_container_width=True, config=PLOT_CONFIG)
         st.markdown('</div>', unsafe_allow_html=True)
 
-    st.markdown('<div class="chart-container" style="padding-bottom:10px;"><div class="chart-title">Intraday Absorption & Exhaustion Engine (Synthetic Future vs Options)</div>', unsafe_allow_html=True)
+    st.markdown('<div class="glass-panel" style="padding-bottom:10px;"><div class="chart-title">Intraday Absorption & Exhaustion Engine (Synthetic Future vs Options)</div>', unsafe_allow_html=True)
     abs_data = []
     windows = [5, 10, 15, 30, 60]
     
@@ -776,7 +833,7 @@ with tab1: # PRINCE ANALYSIS
     else: st.info("Gathering historical data for Intraday Engine. Please wait.")
     st.markdown('</div>', unsafe_allow_html=True)
 
-    st.markdown('<div class="chart-container"><div class="chart-title">ATM ±5 Strike Options Buildup Analyzer</div>', unsafe_allow_html=True)
+    st.markdown('<div class="glass-panel"><div class="chart-title">ATM ±5 Strike Options Buildup Analyzer</div>', unsafe_allow_html=True)
     b_win = st.radio("Select Buildup Timeframe:", ["5m", "10m", "15m", "30m", "1H"], horizontal=True, key="buildup_win")
     mins = int(b_win.replace("m", "").replace("H", "")) * (60 if "H" in b_win else 1)
     target_ts = int(time.time()) - (mins * 60)
@@ -822,7 +879,7 @@ with tab2: # GREEK EXPOSURES
 
     e1, e2 = st.columns(2)
     with e1:
-        st.markdown('<div class="chart-container"><div class="chart-title">Net Delta Exposure (DEX) By Strike</div>', unsafe_allow_html=True)
+        st.markdown('<div class="glass-panel"><div class="chart-title">Net Delta Exposure (DEX) By Strike</div>', unsafe_allow_html=True)
         dex_tot = df_filtered['Net_DEX'].sum() if not df_filtered.empty else 0
         dex_interp_str = f"🟢 <b>Live Delta Bias ({fmt_num(dex_tot)}):</b> Market Makers are Long Delta. They will sell underlying to hedge down-moves (Support)." if dex_tot > 0 else f"🔴 <b>Live Delta Bias ({fmt_num(dex_tot)}):</b> Market Makers are Short Delta. They will buy underlying to hedge up-moves (Resistance)."
         st.markdown(f'<div class="interp-box">{dex_interp_str}</div>', unsafe_allow_html=True)
@@ -837,7 +894,7 @@ with tab2: # GREEK EXPOSURES
         st.plotly_chart(apply_dark_layout(fig_dex, 350, True, df_filtered, atm_strike), use_container_width=True, config=PLOT_CONFIG)
         st.markdown('</div>', unsafe_allow_html=True)
     with e2:
-        st.markdown('<div class="chart-container"><div class="chart-title">Net Gamma Exposure (GEX) By Strike</div>', unsafe_allow_html=True)
+        st.markdown('<div class="glass-panel"><div class="chart-title">Net Gamma Exposure (GEX) By Strike</div>', unsafe_allow_html=True)
         gex_tot = df_filtered['Net_GEX'].sum() if not df_filtered.empty else 0
         gex_interp_str = f"🟢 <b>Live Gamma Regime ({fmt_num(gex_tot)}):</b> Market Makers are Long Gamma. They buy dips and sell rips (Volatility Dampening)." if gex_tot > 0 else f"🔴 <b>Live Gamma Regime ({fmt_num(gex_tot)}):</b> Market Makers are Short Gamma. They sell dips and buy rips (Volatility Accelerating)."
         st.markdown(f'<div class="interp-box">{gex_interp_str}</div>', unsafe_allow_html=True)
@@ -855,7 +912,7 @@ with tab2: # GREEK EXPOSURES
 
     e3, e4 = st.columns(2)
     with e3:
-        st.markdown('<div class="chart-container"><div class="chart-title">Tradytics Vanna Exposure (VEX)</div>', unsafe_allow_html=True)
+        st.markdown('<div class="glass-panel"><div class="chart-title">Tradytics Vanna Exposure (VEX)</div>', unsafe_allow_html=True)
         net_vex_tot = df_filtered["Net_VEX"].sum()
         vex_interp_str = f"🟢 <b>Live Vanna Signal ({fmt_num(net_vex_tot)}):</b> Positive Net Vanna means IV expansion forces dealers to buy futures, dampening downside sell-offs." if net_vex_tot > 0 else f"🔴 <b>Live Vanna Signal ({fmt_num(net_vex_tot)}):</b> Negative Net Vanna means IV expansion forces dealers to sell futures, accelerating market downturns."
         st.markdown(f'<div class="interp-box">{vex_interp_str}</div>', unsafe_allow_html=True)
@@ -866,7 +923,7 @@ with tab2: # GREEK EXPOSURES
         st.plotly_chart(apply_dark_layout(fig_vex, 250, True, df_filtered, atm_strike), use_container_width=True, config=PLOT_CONFIG)
         st.markdown('</div>', unsafe_allow_html=True)
     with e4:
-        st.markdown('<div class="chart-container"><div class="chart-title">Tradytics Charm Exposure (CHEX)</div>', unsafe_allow_html=True)
+        st.markdown('<div class="glass-panel"><div class="chart-title">Tradytics Charm Exposure (CHEX)</div>', unsafe_allow_html=True)
         net_chex_tot = df_filtered["Net_CHEX"].sum()
         chex_interp_str = f"🟢 <b>Live Charm Signal ({fmt_num(net_chex_tot)}):</b> Positive Net Charm indicates time decay forces dealers to steadily buy futures (Bullish drift)." if net_chex_tot > 0 else f"🔴 <b>Live Charm Signal ({fmt_num(net_chex_tot)}):</b> Negative Net Charm indicates time decay forces dealers to sell futures (Bearish drift)."
         st.markdown(f'<div class="interp-box">{chex_interp_str}</div>', unsafe_allow_html=True)
@@ -880,7 +937,7 @@ with tab2: # GREEK EXPOSURES
 with tab3: # INTRADAY & ADVANCED ANALYTICS (MERGED)
     r1c1, r1c2 = st.columns(2)
     with r1c1:
-        st.markdown(f'<div class="chart-container"><div class="chart-title">Intraday IV Spread Movement ({selected_target_strike})</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="glass-panel"><div class="chart-title">Intraday IV Spread Movement ({selected_target_strike})</div>', unsafe_allow_html=True)
         fig_ts = go.Figure()
         if not iv_hist.empty: 
             strike_history = iv_hist[iv_hist["Strike"] == selected_target_strike]
@@ -889,7 +946,7 @@ with tab3: # INTRADAY & ADVANCED ANALYTICS (MERGED)
         st.plotly_chart(apply_dark_layout(fig_ts), use_container_width=True, config=PLOT_CONFIG)
         st.markdown('</div>', unsafe_allow_html=True)
     with r1c2:
-        st.markdown('<div class="chart-container"><div class="chart-title">15-Min PCR Velocity (ΔPCR)</div>', unsafe_allow_html=True)
+        st.markdown('<div class="glass-panel"><div class="chart-title">15-Min PCR Velocity (ΔPCR)</div>', unsafe_allow_html=True)
         fig_pcr = go.Figure()
         if not pcr_df.empty: fig_pcr.add_trace(go.Bar(x=pcr_df["Time"], y=pcr_df["Delta_PCR_15m"], marker_color=["#00E676" if v >= 0.15 else ("#FF5252" if v <= -0.15 else "#8A93A6") for v in pcr_df["Delta_PCR_15m"]]))
         fig_pcr.add_hline(y=0.15, line_dash="dash", line_color="#00E676"); fig_pcr.add_hline(y=-0.15, line_dash="dash", line_color="#FF5252")
@@ -898,7 +955,7 @@ with tab3: # INTRADAY & ADVANCED ANALYTICS (MERGED)
 
     r2c1, r2c2 = st.columns(2)
     with r2c1:
-        st.markdown('<div class="chart-container"><div class="chart-title">Cumulative Open Interest Trend (Cr)</div>', unsafe_allow_html=True)
+        st.markdown('<div class="glass-panel"><div class="chart-title">Cumulative Open Interest Trend (Cr)</div>', unsafe_allow_html=True)
         fig_oi_trend = go.Figure()
         if not pcr_df.empty:
             fig_oi_trend.add_trace(go.Scatter(x=pcr_df["Time"], y=pcr_df["Total_PE_OI"]/1e7, mode="lines", name="Put OI (PE)", line=dict(color="#FF5252", width=2)))
@@ -907,7 +964,7 @@ with tab3: # INTRADAY & ADVANCED ANALYTICS (MERGED)
         st.plotly_chart(apply_dark_layout(fig_oi_trend), use_container_width=True, config=PLOT_CONFIG)
         st.markdown('</div>', unsafe_allow_html=True)
     with r2c2:
-        st.markdown('<div class="chart-container"><div class="chart-title">Intraday PCR & Vol PCR Trend</div>', unsafe_allow_html=True)
+        st.markdown('<div class="glass-panel"><div class="chart-title">Intraday PCR & Vol PCR Trend</div>', unsafe_allow_html=True)
         fig_pcr_t = go.Figure()
         if not pcr_df.empty:
             fig_pcr_t.add_trace(go.Scatter(x=pcr_df["Time"], y=pcr_df["PCR"], mode="lines", name="OI PCR", line=dict(color="#29B6F6", width=2)))
@@ -917,7 +974,7 @@ with tab3: # INTRADAY & ADVANCED ANALYTICS (MERGED)
 
     r3c1, r3c2 = st.columns(2)
     with r3c1:
-        st.markdown('<div class="chart-container"><div class="chart-title">Real-Time Delta-Weighted Net OI</div>', unsafe_allow_html=True)
+        st.markdown('<div class="glass-panel"><div class="chart-title">Real-Time Delta-Weighted Net OI</div>', unsafe_allow_html=True)
         st.markdown('<div class="interp-box">💡 <b>Delta-Weighted OI:</b> <span style="color:var(--green);">Positive = Market Makers are Long Delta (Bullish).</span> <span style="color:var(--red);">Negative = Market Makers are Short Delta (Bearish).</span></div>', unsafe_allow_html=True)
         fig_doi = go.Figure()
         if not doi_df.empty: fig_doi.add_trace(go.Scatter(x=doi_df["Time"], y=doi_df["Total_Net_Delta_OI"], mode="lines", fill='tozeroy', line=dict(color="#00E676", width=2)))
@@ -925,7 +982,7 @@ with tab3: # INTRADAY & ADVANCED ANALYTICS (MERGED)
         st.plotly_chart(apply_dark_layout(fig_doi), use_container_width=True, config=PLOT_CONFIG)
         st.markdown('</div>', unsafe_allow_html=True)
     with r3c2:
-        st.markdown('<div class="chart-container"><div class="chart-title">Dealer Delta Velocity (DEX 5m ROC)</div>', unsafe_allow_html=True)
+        st.markdown('<div class="glass-panel"><div class="chart-title">Dealer Delta Velocity (DEX 5m ROC)</div>', unsafe_allow_html=True)
         st.markdown('<div class="interp-box">💡 Tracks the 5-minute rate of change of Dealer Delta Exposure to detect rapid hedging moves.</div>', unsafe_allow_html=True)
         fig_dvel = go.Figure()
         if not doi_df.empty: fig_dvel.add_trace(go.Bar(x=doi_df["Time"], y=doi_df["DEX_Vel_5m"], marker_color=["#00E676" if v >= 0 else "#FF5252" for v in doi_df["DEX_Vel_5m"]]))
@@ -935,7 +992,7 @@ with tab3: # INTRADAY & ADVANCED ANALYTICS (MERGED)
 
     a1, a2 = st.columns(2)
     with a1:
-        st.markdown('<div class="chart-container"><div class="chart-title">Put-Call Parity Discrepancy Index (PCP_Dev)</div>', unsafe_allow_html=True)
+        st.markdown('<div class="glass-panel"><div class="chart-title">Put-Call Parity Discrepancy Index (PCP_Dev)</div>', unsafe_allow_html=True)
         fig_pcp = go.Figure()
         if not synth_df.empty:
             fig_pcp.add_trace(go.Bar(x=synth_df["Time"], y=synth_df["PCP_Dev_Mean"], marker_color=["#00E676" if v > 0 else "#FF5252" for v in synth_df["PCP_Dev_Mean"]]))
@@ -944,7 +1001,7 @@ with tab3: # INTRADAY & ADVANCED ANALYTICS (MERGED)
         st.plotly_chart(apply_dark_layout(fig_pcp), use_container_width=True, config=PLOT_CONFIG)
         st.markdown('</div>', unsafe_allow_html=True)
     with a2:
-        st.markdown('<div class="chart-container"><div class="chart-title">Multi-Strike Synthetic Parity Engine</div>', unsafe_allow_html=True)
+        st.markdown('<div class="glass-panel"><div class="chart-title">Multi-Strike Synthetic Parity Engine</div>', unsafe_allow_html=True)
         fig_synth = go.Figure()
         if not synth_df.empty:
             fig_synth.add_trace(go.Scatter(x=synth_df["Time"], y=synth_df["Spot"], mode="lines", name="Spot", line=dict(color="#FFD700", width=2)))
@@ -956,7 +1013,7 @@ with tab3: # INTRADAY & ADVANCED ANALYTICS (MERGED)
 
     a3, a4 = st.columns(2)
     with a3:
-        st.markdown('<div class="chart-container"><div class="chart-title">Fyers ATM Straddle LTP vs Price vs Straddle VWAP</div>', unsafe_allow_html=True)
+        st.markdown('<div class="glass-panel"><div class="chart-title">Fyers ATM Straddle LTP vs Price vs Straddle VWAP</div>', unsafe_allow_html=True)
         fig_fyers_strad = make_subplots(specs=[[{"secondary_y": True}]])
         if not strad_df.empty:
             fig_fyers_strad.add_trace(go.Scatter(x=strad_df["Time"], y=strad_df["Actual_Straddle"], mode="lines", name="ATM Straddle LTP", line=dict(color="#FF5252", width=2)), secondary_y=False)
@@ -969,7 +1026,7 @@ with tab3: # INTRADAY & ADVANCED ANALYTICS (MERGED)
         st.plotly_chart(apply_dark_layout(fig_fyers_strad), use_container_width=True, config=PLOT_CONFIG)
         st.markdown('</div>', unsafe_allow_html=True)
     with a4:
-        st.markdown('<div class="chart-container"><div class="chart-title">Gamma Flip Migration (ΔFlip)</div>', unsafe_allow_html=True)
+        st.markdown('<div class="glass-panel"><div class="chart-title">Gamma Flip Migration (ΔFlip)</div>', unsafe_allow_html=True)
         fig_flip = go.Figure()
         if not gex_df.empty:
             fig_flip.add_trace(go.Scatter(x=gex_df["Time"], y=gex_df["Spot"], mode="lines", name="Spot", line=dict(color="#FFD700", width=2)))
@@ -980,7 +1037,7 @@ with tab3: # INTRADAY & ADVANCED ANALYTICS (MERGED)
 with tab4: # OPENBULL & FYERS SKEW
     f1, f2 = st.columns(2)
     with f1:
-        st.markdown('<div class="chart-container"><div class="chart-title">Fyers Multi-Day Macro Overlay (PCR vs Price)</div>', unsafe_allow_html=True)
+        st.markdown('<div class="glass-panel"><div class="chart-title">Fyers Multi-Day Macro Overlay (PCR vs Price)</div>', unsafe_allow_html=True)
         fig_macro = make_subplots(specs=[[{"secondary_y": True}]])
         if not pcr_df.empty:
             fig_macro.add_trace(go.Scatter(x=pcr_df["Time"], y=pcr_df["PCR"], mode="lines", name="PCR", line=dict(color="#AB47BC", width=2)), secondary_y=False)
@@ -992,7 +1049,7 @@ with tab4: # OPENBULL & FYERS SKEW
         st.markdown('</div>', unsafe_allow_html=True)
 
     with f2:
-        st.markdown('<div class="chart-container"><div class="chart-title">Fyers Selected Strikes IV Overlay vs Price</div>', unsafe_allow_html=True)
+        st.markdown('<div class="glass-panel"><div class="chart-title">Fyers Selected Strikes IV Overlay vs Price</div>', unsafe_allow_html=True)
         selected_iv_strikes = st.multiselect("Select Strikes to Track IV:", options=df_filtered["Strike"].tolist(), default=[atm_strike-50, atm_strike, atm_strike+50], key="fyers_ms_iv")
         fig_ms_iv = make_subplots(specs=[[{"secondary_y": True}]])
         if not iv_hist.empty and selected_iv_strikes:
@@ -1011,7 +1068,7 @@ with tab4: # OPENBULL & FYERS SKEW
 
     v1, v2 = st.columns(2)
     with v1:
-        st.markdown('<div class="chart-container"><div class="chart-title">OpenBull IV Smile (Volatility Skew Profile)</div>', unsafe_allow_html=True)
+        st.markdown('<div class="glass-panel"><div class="chart-title">OpenBull IV Smile (Volatility Skew Profile)</div>', unsafe_allow_html=True)
         fig_smile = go.Figure()
         fig_smile.add_trace(go.Scatter(x=df_filtered["Strike"], y=df_filtered["PE_IV"], mode="lines+markers", name="Put IV (PE)", line=dict(color="#FF5252", width=2)))
         fig_smile.add_trace(go.Scatter(x=df_filtered["Strike"], y=df_filtered["CE_IV"], mode="lines+markers", name="Call IV (CE)", line=dict(color="#00E676", width=2)))
@@ -1020,10 +1077,11 @@ with tab4: # OPENBULL & FYERS SKEW
         st.markdown('</div>', unsafe_allow_html=True)
         
     with v2:
-        st.markdown('<div class="chart-container"><div class="chart-title">OpenBull 3D Volatility Surface</div>', unsafe_allow_html=True)
+        st.markdown('<div class="glass-panel"><div class="chart-title">OpenBull 3D Volatility Surface</div>', unsafe_allow_html=True)
         st.markdown('<div class="interp-box">💡 <b>3D Vol Skew Surface:</b> Visualizes IV across Strike (X) and Days (Y). Peaks indicate localized options demand.</div>', unsafe_allow_html=True)
         exp_list_surf = [selected_expiry] + [x for x in valid_expiries if x != selected_expiry][:3]
-        _, df_surface = fetch_multi_expiry_vol_structure(spot_price, exp_list_surf)
+        with st.spinner("Loading 3D Surface..."):
+            _, df_surface = fetch_multi_expiry_vol_structure(spot_price, exp_list_surf)
         if not df_surface.empty:
             pivot_surface = df_surface.pivot_table(index='Days', columns='Strike', values='IV', aggfunc='mean').ffill(axis=1).bfill(axis=1).fillna(0)
             fig_surf = go.Figure(data=[go.Surface(z=pivot_surface.values, x=pivot_surface.columns.tolist(), y=pivot_surface.index.tolist(), colorscale='Viridis', showscale=False)])
@@ -1033,18 +1091,37 @@ with tab4: # OPENBULL & FYERS SKEW
         st.markdown('</div>', unsafe_allow_html=True)
 
 with tab5: # DATA GRID
-    st.markdown('<div class="chart-container"><div class="chart-title">Institutional Options Chain Grid</div>', unsafe_allow_html=True)
+    st.markdown('<div class="glass-panel"><div class="chart-title">Institutional Options Chain Grid</div>', unsafe_allow_html=True)
     grid_df = df_filtered[["Strike", "CE_LTP", "PE_LTP", "CE_OI", "PE_OI", "CE_OI_Chg", "PE_OI_Chg", "CE_Delta", "PE_Delta", "Net_Delta_OI", "Net_DEX", "Net_GEX", "CE_VEX", "PE_VEX", "CE_CHEX", "PE_CHEX", "CE_Vega", "PE_Vega", "CE_Vomma", "PE_Vomma", "CE_SPEX", "PE_SPEX", "CE_IV", "PE_IV"]].copy()
-    st.dataframe(grid_df.style.format({"Strike": "{:.0f}", "CE_LTP": "₹{:.2f}", "PE_LTP": "₹{:.2f}", "CE_OI": "{:,.0f}", "PE_OI": "{:,.0f}", "CE_OI_Chg": "{:,.0f}", "PE_OI_Chg": "{:,.0f}", "CE_Delta": "{:.2f}", "PE_Delta": "{:.2f}", "Net_Delta_OI": "{:+,.0f}", "Net_DEX": "{:+,.1f}L", "Net_GEX": "{:+,.1f}L", "CE_VEX": "{:.2f}", "PE_VEX": "{:.2f}", "CE_CHEX": "{:.2f}", "PE_CHEX": "{:.2f}", "CE_Vega": "{:.2f}", "PE_Vega": "{:.2f}", "CE_Vomma": "{:.2f}", "PE_Vomma": "{:.2f}", "CE_SPEX": "{:.2f}", "PE_SPEX": "{:.2f}", "CE_IV": "{:.1f}%", "PE_IV": "{:.1f}%"}), use_container_width=True, height=500)
+    
+    def colorize_iv(val):
+        if val > 20: return 'color: #FF5252; font-weight: bold'
+        elif val < 10: return 'color: #00E676; font-weight: bold'
+        return ''
+
+    st.dataframe(grid_df.style.format({
+        "Strike": "{:.0f}", "CE_LTP": "₹{:.2f}", "PE_LTP": "₹{:.2f}", "CE_OI": "{:,.0f}", "PE_OI": "{:,.0f}", 
+        "CE_OI_Chg": "{:,.0f}", "PE_OI_Chg": "{:,.0f}", "CE_Delta": "{:.2f}", "PE_Delta": "{:.2f}", "Net_Delta_OI": "{:+,.0f}", 
+        "Net_DEX": "{:+,.1f}L", "Net_GEX": "{:+,.1f}L", "CE_VEX": "{:.2f}", "PE_VEX": "{:.2f}", "CE_CHEX": "{:.2f}", "PE_CHEX": "{:.2f}", 
+        "CE_Vega": "{:.2f}", "PE_Vega": "{:.2f}", "CE_Vomma": "{:.2f}", "PE_Vomma": "{:.2f}", "CE_SPEX": "{:.2f}", "PE_SPEX": "{:.2f}", 
+        "CE_IV": "{:.1f}%", "PE_IV": "{:.1f}%"
+    }).applymap(colorize_iv, subset=['CE_IV', 'PE_IV']), use_container_width=True, height=500)
     st.markdown('</div>', unsafe_allow_html=True)
 
 with tab6: # NIFTY 50 CAMARILLA RADAR
-    st.markdown('<div class="chart-container"><div class="chart-title">Nifty 50 Weighted Camarilla Matrix (S3/R3 Reversal Zones)</div>', unsafe_allow_html=True)
+    st.markdown('<div class="glass-panel"><div class="chart-title">Nifty 50 Weighted Camarilla Matrix (S3/R3 Reversal Zones)</div>', unsafe_allow_html=True)
     st.markdown('<div class="interp-box">💡 <b>Camarilla Radar:</b> Tracks all Nifty 50 stocks for touches of Camarilla S3 (Buy Zone) and R3 (Sell Zone). Sends instant Telegram alerts when tested.</div>', unsafe_allow_html=True)
     
     df_cam = get_nifty50_camarilla()
     if not df_cam.empty:
         process_camarilla_alerts(df_cam, is_market_live, today_date_str)
+        
+        fig_cam_scatter = go.Figure()
+        fig_cam_scatter.add_trace(go.Scatter(x=df_cam["Dist_S3_%"], y=df_cam["Weight"], mode="markers", name="Near S3 (Support)", marker=dict(color="#00E676", size=df_cam["Weight"]*2)))
+        fig_cam_scatter.add_trace(go.Scatter(x=df_cam["Dist_R3_%"], y=df_cam["Weight"], mode="markers", name="Near R3 (Resistance)", marker=dict(color="#FF5252", size=df_cam["Weight"]*2)))
+        fig_cam_scatter.update_layout(xaxis_title="Distance to Level (%)", yaxis_title="Nifty 50 Weight (%)", height=300)
+        st.plotly_chart(apply_dark_layout(fig_cam_scatter, 300), use_container_width=True, config=PLOT_CONFIG)
+
         c1, c2 = st.columns(2)
         with c1:
             st.markdown("<h4 style='color:var(--green); font-size:1rem; margin-bottom:10px;'>🟢 Approaching S3 Support (Mean Reversion Buy)</h4>", unsafe_allow_html=True)
@@ -1061,10 +1138,10 @@ with tab6: # NIFTY 50 CAMARILLA RADAR
     st.markdown('</div>', unsafe_allow_html=True)
 
 with tab7: # ERROR LOGS & DIAGNOSTICS
-    st.markdown('<div class="chart-container"><div class="chart-title">Background Diagnostic Logs</div>', unsafe_allow_html=True)
-    if len(GLOBAL_STATE["errors"]) == 0:
+    st.markdown('<div class="glass-panel"><div class="chart-title">Background Diagnostic Logs</div>', unsafe_allow_html=True)
+    if len(GLOBAL_STATE.get("errors")) == 0:
         st.success("✅ System Health is Optimal. 0 Critical Exceptions recorded in session.")
     else:
-        for err in GLOBAL_STATE["errors"]:
+        for err in GLOBAL_STATE.get("errors"):
             st.markdown(f"<div style='color:var(--red); font-family:monospace; padding:5px; border-bottom:1px solid #2A2E39;'>{err}</div>", unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
