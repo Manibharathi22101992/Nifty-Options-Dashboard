@@ -184,20 +184,17 @@ def process_camarilla_alerts(df_camarilla, is_market_live, today_date_str):
 # 4. MATHEMATICAL ENGINE & GREEKS
 # ---------------------------------------------------------
 def calculate_bs_greeks(S, K, T, iv_ce, iv_pe, r=RISK_FREE_RATE, q=NIFTY_DIVIDEND_YIELD):
-    """Accurate Dual-IV Greek engine generating exactly 13 explicit metrics."""
     if T <= 1e-5 or S <= 0 or K <= 0: 
         return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
     try:
         iv_ce = max(iv_ce, 1e-4)
         iv_pe = max(iv_pe, 1e-4)
 
-        # Call calculations
         d1_ce = (math.log(S / K) + (r - q + 0.5 * iv_ce**2) * T) / (iv_ce * math.sqrt(T))
         d2_ce = d1_ce - iv_ce * math.sqrt(T)
         pdf_ce = (1.0 / math.sqrt(2 * math.pi)) * math.exp(max(-0.5 * d1_ce * d1_ce, -300))
         cdf_ce = 0.5 * (1.0 + math.erf(d1_ce / math.sqrt(2.0)))
 
-        # Put calculations
         d1_pe = (math.log(S / K) + (r - q + 0.5 * iv_pe**2) * T) / (iv_pe * math.sqrt(T))
         d2_pe = d1_pe - iv_pe * math.sqrt(T)
         pdf_pe = (1.0 / math.sqrt(2 * math.pi)) * math.exp(max(-0.5 * d1_pe * d1_pe, -300))
@@ -381,6 +378,10 @@ def check_and_reset(df_name, cols, today_date_str, now_time_str):
     if not df.empty and str(df.iloc[-1]["Date"]) != today_date_str and now_time_str >= "09:15:00":
         df = pd.DataFrame(columns=cols)
         save_persisted_df(df, df_name)
+    
+    if "Timestamp_dt" in df.columns and not df.empty:
+        df["Timestamp_dt"] = pd.to_datetime(df["Timestamp_dt"])
+        
     return df
 
 @st.cache_data(ttl=60)
@@ -778,7 +779,6 @@ with tab1: # PRINCE ANALYSIS
     st.markdown('</div>', unsafe_allow_html=True)
 
 with tab2: # GREEK EXPOSURES
-    # NET GAMMA EXPOSURE (GEX) FULL WIDTH TOP
     st.markdown('<div class="chart-container"><div class="chart-title">Net Gamma Exposure (GEX) Profile</div>', unsafe_allow_html=True)
     gex_tot = df_filtered['Net_GEX'].sum() if not df_filtered.empty else 0
     gex_interp_str = f"🟢 <b>Live Gamma Regime ({fmt_num(gex_tot)}):</b> Market Makers are Long Gamma. They buy dips and sell rips (Volatility Dampening)." if gex_tot > 0 else f"🔴 <b>Live Gamma Regime ({fmt_num(gex_tot)}):</b> Market Makers are Short Gamma. They sell dips and buy rips (Volatility Accelerating)."
@@ -842,7 +842,7 @@ with tab2: # GREEK EXPOSURES
     with e4:
         st.markdown('<div class="chart-container"><div class="chart-title">Tradytics Speed Exposure (SPEX)</div>', unsafe_allow_html=True)
         net_spex_tot = df_filtered["Net_SPEX"].sum()
-        spex_interp_str = f"🟢 <b>Signal ({fmt_num(net_spex_tot)}):</b> High positive Speed points to rapid Gamma expansion." if net_spex_tot > 0 else f"🔴 <b>Signal ({fmt_num(net_spex_tot)}):</b> Negative Speed points to stabilizing Gamma."
+        spex_interp_str = f"🟢 <b>Signal ({fmt_num(net_spex_tot)}):</b> Positive Speed points to rapid Gamma expansion." if net_spex_tot > 0 else f"🔴 <b>Signal ({fmt_num(net_spex_tot)}):</b> Negative Speed points to stabilizing Gamma."
         st.markdown(f'<div class="interp-box">{spex_interp_str}</div>', unsafe_allow_html=True)
         fig_spex = go.Figure()
         fig_spex.add_trace(go.Bar(x=df_chart_view["Strike"], y=df_chart_view["PE_SPEX"], name="Put SPEX (PE)", marker_color="#FF5252"))
