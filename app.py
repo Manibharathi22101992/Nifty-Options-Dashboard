@@ -378,9 +378,10 @@ def check_and_reset(df_name, cols, today_date_str, now_time_str):
     if not df.empty and str(df.iloc[-1]["Date"]) != today_date_str and now_time_str >= "09:15:00":
         df = pd.DataFrame(columns=cols)
         save_persisted_df(df, df_name)
-    
-    if "Timestamp_dt" in df.columns and not df.empty:
-        df["Timestamp_dt"] = pd.to_datetime(df["Timestamp_dt"])
+        
+    # Force Timestamp strictly to numeric to bypass Streamlit Cloud PyArrow string parsing crashes
+    if "Timestamp" in df.columns and not df.empty:
+        df["Timestamp"] = pd.to_numeric(df["Timestamp"], errors='coerce').fillna(0).astype(int)
         
     return df
 
@@ -475,10 +476,10 @@ for key, cols in [
     ("absorption_history", ["Date", "Timestamp", "Spot", "Fut_LTP", "CE_OI", "PE_OI", "CE_Vol", "PE_Vol"]),
     ("oi_snapshots", ["Date", "Timestamp", "Strike", "CE_OI", "PE_OI", "CE_LTP", "PE_LTP"]),
     ("iv_spread_history", ["Date", "Time", "Strike", "CE_IV", "PE_IV", "IV_Spread", "Spot"]),
-    ("pcr_history", ["Date", "Timestamp_dt", "Time", "PCR", "Vol_PCR", "Delta_PCR_5m", "Delta_PCR_15m", "Total_CE_OI", "Total_PE_OI"]),
-    ("gex_history", ["Date", "Timestamp_dt", "Time", "Total_Net_GEX", "Z_GEX", "Flip_Strike", "Spot", "Max_Pain"]),
+    ("pcr_history", ["Date", "Timestamp", "Time", "PCR", "Vol_PCR", "Delta_PCR_5m", "Delta_PCR_15m", "Total_CE_OI", "Total_PE_OI"]),
+    ("gex_history", ["Date", "Timestamp", "Time", "Total_Net_GEX", "Z_GEX", "Flip_Strike", "Spot", "Max_Pain"]),
     ("synth_history", ["Date", "Time", "Spot", "Strike_M50", "Strike_ATM", "Strike_P50", "Synth_M50", "Synth_ATM", "Synth_P50", "PCP_Dev_Mean"]),
-    ("delta_oi_history", ["Date", "Timestamp_dt", "Time", "Total_Net_Delta_OI", "Delta_OI_ROC_1m", "Total_Net_DEX", "DEX_Vel_5m"]),
+    ("delta_oi_history", ["Date", "Timestamp", "Time", "Total_Net_Delta_OI", "Delta_OI_ROC_1m", "Total_Net_DEX", "DEX_Vel_5m"]),
     ("straddle_history", ["Date", "Time", "Elapsed_Mins", "Actual_Straddle", "Expected_Straddle", "Regime", "Straddle_VWAP"])
 ]:
     if key not in st.session_state: st.session_state[key] = check_and_reset(key, cols, today_date_str, now_time_str)
@@ -551,8 +552,12 @@ if is_market_live:
     current_pcr = total_pe_oi_sum / max(total_ce_oi_sum, 1)
     vol_pcr = df_oc["PE_Vol"].sum() / max(df_oc["CE_Vol"].sum(), 1)
     if pcr_df.empty or str(pcr_df.iloc[-1]["Time"]) != now_time_str:
-        dp_15m = current_pcr - pcr_df[pcr_df["Timestamp_dt"] <= now_ist - datetime.timedelta(minutes=15)].iloc[-1]["PCR"] if not pcr_df[pcr_df["Timestamp_dt"] <= now_ist - datetime.timedelta(minutes=15)].empty else 0.0
-        st.session_state["pcr_history"] = pd.concat([pcr_df, pd.DataFrame([{"Date": today_date_str, "Timestamp_dt": now_ist, "Time": now_time_str, "PCR": current_pcr, "Vol_PCR": vol_pcr, "Delta_PCR_5m": 0.0, "Delta_PCR_15m": dp_15m, "Total_CE_OI": total_ce_oi_sum, "Total_PE_OI": total_pe_oi_sum}])], ignore_index=True)
+        pcr_df["Timestamp"] = pd.to_numeric(pcr_df["Timestamp"], errors='coerce').fillna(0)
+        past_pcr = pcr_df[pcr_df["Timestamp"] <= now_ts - 900]
+        dp_15m = current_pcr - past_pcr.iloc[-1]["PCR"] if not past_pcr.empty else 0.0
+        
+        new_row = pd.DataFrame([{"Date": today_date_str, "Timestamp": now_ts, "Time": now_time_str, "PCR": current_pcr, "Vol_PCR": vol_pcr, "Delta_PCR_5m": 0.0, "Delta_PCR_15m": dp_15m, "Total_CE_OI": total_ce_oi_sum, "Total_PE_OI": total_pe_oi_sum}])
+        st.session_state["pcr_history"] = pd.concat([pcr_df, new_row], ignore_index=True)
         save_persisted_df(st.session_state["pcr_history"], "pcr_history")
 
     max_pain_strike = atm_strike
@@ -561,15 +566,22 @@ if is_market_live:
 
     gex_df = st.session_state["gex_history"]
     if gex_df.empty or str(gex_df.iloc[-1]["Time"]) != now_time_str:
+        gex_df["Timestamp"] = pd.to_numeric(gex_df["Timestamp"], errors='coerce').fillna(0)
         z_gex = (df_oc["Net_GEX"].sum() - gex_df["Total_Net_GEX"].tail(20).mean()) / max(gex_df["Total_Net_GEX"].tail(20).std(), 1e-6) if len(gex_df) >= 2 else 0.0
-        st.session_state["gex_history"] = pd.concat([gex_df, pd.DataFrame([{"Date": today_date_str, "Timestamp_dt": now_ist, "Time": now_time_str, "Total_Net_GEX": df_oc["Net_GEX"].sum(), "Z_GEX": z_gex, "Flip_Strike": gamma_flip_strike, "Spot": spot_price, "Max_Pain": max_pain_strike}])], ignore_index=True)
+        new_row = pd.DataFrame([{"Date": today_date_str, "Timestamp": now_ts, "Time": now_time_str, "Total_Net_GEX": df_oc["Net_GEX"].sum(), "Z_GEX": z_gex, "Flip_Strike": gamma_flip_strike, "Spot": spot_price, "Max_Pain": max_pain_strike}])
+        st.session_state["gex_history"] = pd.concat([gex_df, new_row], ignore_index=True)
         save_persisted_df(st.session_state["gex_history"], "gex_history")
 
     doi_df = st.session_state["delta_oi_history"]
     if doi_df.empty or str(doi_df.iloc[-1]["Time"]) != now_time_str:
-        d_roc_1m = df_oc["Net_Delta_OI"].sum() - doi_df[doi_df["Timestamp_dt"] <= now_ist - datetime.timedelta(minutes=1)].iloc[-1]["Total_Net_Delta_OI"] if not doi_df[doi_df["Timestamp_dt"] <= now_ist - datetime.timedelta(minutes=1)].empty else 0.0
-        dex_vel = (df_oc["Net_DEX"].sum()) - doi_df[doi_df["Timestamp_dt"] <= now_ist - datetime.timedelta(minutes=5)].iloc[-1]["Total_Net_DEX"] if not doi_df[doi_df["Timestamp_dt"] <= now_ist - datetime.timedelta(minutes=5)].empty else 0.0
-        st.session_state["delta_oi_history"] = pd.concat([doi_df, pd.DataFrame([{"Date": today_date_str, "Timestamp_dt": now_ist, "Time": now_time_str, "Total_Net_Delta_OI": df_oc["Net_Delta_OI"].sum(), "Delta_OI_ROC_1m": d_roc_1m, "Total_Net_DEX": df_oc["Net_DEX"].sum(), "DEX_Vel_5m": dex_vel}])], ignore_index=True)
+        doi_df["Timestamp"] = pd.to_numeric(doi_df["Timestamp"], errors='coerce').fillna(0)
+        past_doi_1m = doi_df[doi_df["Timestamp"] <= now_ts - 60]
+        past_doi_5m = doi_df[doi_df["Timestamp"] <= now_ts - 300]
+        d_roc_1m = df_oc["Net_Delta_OI"].sum() - past_doi_1m.iloc[-1]["Total_Net_Delta_OI"] if not past_doi_1m.empty else 0.0
+        dex_vel = (df_oc["Net_DEX"].sum()) - past_doi_5m.iloc[-1]["Total_Net_DEX"] if not past_doi_5m.empty else 0.0
+        
+        new_row = pd.DataFrame([{"Date": today_date_str, "Timestamp": now_ts, "Time": now_time_str, "Total_Net_Delta_OI": df_oc["Net_Delta_OI"].sum(), "Delta_OI_ROC_1m": d_roc_1m, "Total_Net_DEX": df_oc["Net_DEX"].sum(), "DEX_Vel_5m": dex_vel}])
+        st.session_state["delta_oi_history"] = pd.concat([doi_df, new_row], ignore_index=True)
         save_persisted_df(st.session_state["delta_oi_history"], "delta_oi_history")
 
     strad_df = st.session_state["straddle_history"]
