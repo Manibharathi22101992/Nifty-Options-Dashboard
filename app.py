@@ -54,13 +54,6 @@ except Exception as e:
     YF_AVAILABLE = False
     log_error(f"yFinance Import Failed: {e}")
 
-try:
-    from scipy.stats import norm
-    SCIPY_AVAILABLE = True
-except Exception as e:
-    SCIPY_AVAILABLE = False
-    log_error(f"Scipy missing. Fallback to math.erf (slower).")
-
 NIFTY_50_WEIGHTS = {
     "HDFCBANK.NS": 11.6, "RELIANCE.NS": 9.8, "ICICIBANK.NS": 7.9, "INFY.NS": 5.8, "ITC.NS": 4.5,
     "TCS.NS": 4.1, "LT.NS": 3.4, "AXISBANK.NS": 3.2, "KOTAKBANK.NS": 2.8, "SBIN.NS": 2.7,
@@ -428,12 +421,12 @@ def start_background_daemon():
                             synth_fut = calculate_forward_price(spot_pr, df_oc, 1/365.0)
 
                             abs_df = get_persisted_df("absorption_history", ["Date", "Timestamp", "Spot", "Fut_LTP", "CE_OI", "PE_OI", "CE_Vol", "PE_Vol"])
-                            if abs_df.empty or (now_ts - abs_df["Timestamp"].max() >= 60):
+                            if abs_df.empty or (now_ts - safe_float(abs_df["Timestamp"].max()) >= 60):
                                 new_abs = pd.DataFrame([{"Date": today_str, "Timestamp": now_ts, "Spot": spot_pr, "Fut_LTP": synth_fut, "CE_OI": df_oc["CE_OI"].sum(), "PE_OI": df_oc["PE_OI"].sum(), "CE_Vol": df_oc["CE_Vol"].sum(), "PE_Vol": df_oc["PE_Vol"].sum()}])
                                 save_persisted_df(pd.concat([abs_df, new_abs], ignore_index=True), "absorption_history")
                             
                             oi_snap = get_persisted_df("oi_snapshots", ["Date", "Timestamp", "Strike", "CE_OI", "PE_OI", "CE_LTP", "PE_LTP"])
-                            if oi_snap.empty or (now_ts - oi_snap["Timestamp"].max() >= 60):
+                            if oi_snap.empty or (now_ts - safe_float(oi_snap["Timestamp"].max()) >= 60):
                                 new_snap = df_oc[["Strike", "CE_OI", "PE_OI", "CE_LTP", "PE_LTP"]].copy()
                                 new_snap["Timestamp"] = now_ts; new_snap["Date"] = today_str
                                 save_persisted_df(pd.concat([oi_snap, new_snap], ignore_index=True), "oi_snapshots")
@@ -522,16 +515,16 @@ df_chart_view = df_filtered[(df_filtered["Strike"] >= atm_strike - 350) & (df_fi
 total_ce_oi_sum, total_pe_oi_sum = df_oc["CE_OI"].sum(), df_oc["PE_OI"].sum()
 now_ts = int(time.time())
 
-# UI LIVE MEMORY INJECTION
+# UI LIVE MEMORY INJECTION (PURE INTEGER TIMESTAMP COMPARISONS)
 if is_market_live:
     abs_df = st.session_state["absorption_history"]
-    if abs_df.empty or (now_ts - abs_df["Timestamp"].max() >= 60):
+    if abs_df.empty or (now_ts - safe_float(abs_df["Timestamp"].max()) >= 60):
         new_abs = pd.DataFrame([{"Date": today_date_str, "Timestamp": now_ts, "Spot": spot_price, "Fut_LTP": synthetic_future, "CE_OI": total_ce_oi_sum, "PE_OI": total_pe_oi_sum, "CE_Vol": df_oc["CE_Vol"].sum(), "PE_Vol": df_oc["PE_Vol"].sum()}])
         st.session_state["absorption_history"] = pd.concat([abs_df, new_abs], ignore_index=True)
         save_persisted_df(st.session_state["absorption_history"], "absorption_history")
 
     oi_snap = st.session_state["oi_snapshots"]
-    if oi_snap.empty or (now_ts - oi_snap["Timestamp"].max() >= 60):
+    if oi_snap.empty or (now_ts - safe_float(oi_snap["Timestamp"].max()) >= 60):
         new_snap = df_oc[["Strike", "CE_OI", "PE_OI", "CE_LTP", "PE_LTP"]].copy()
         new_snap["Timestamp"] = now_ts; new_snap["Date"] = today_date_str
         st.session_state["oi_snapshots"] = pd.concat([oi_snap, new_snap], ignore_index=True)
@@ -547,8 +540,7 @@ if is_market_live:
     current_pcr = total_pe_oi_sum / max(total_ce_oi_sum, 1)
     vol_pcr = df_oc["PE_Vol"].sum() / max(df_oc["CE_Vol"].sum(), 1)
     if pcr_df.empty or str(pcr_df.iloc[-1]["Time"]) != now_time_str:
-        pcr_df["Timestamp"] = pd.to_numeric(pcr_df["Timestamp"], errors='coerce').fillna(0)
-        past_pcr = pcr_df[pcr_df["Timestamp"] <= now_ts - 900]
+        past_pcr = pcr_df[pcr_df["Timestamp"].apply(safe_float) <= now_ts - 900] if "Timestamp" in pcr_df.columns else pd.DataFrame()
         dp_15m = current_pcr - past_pcr.iloc[-1]["PCR"] if not past_pcr.empty else 0.0
         
         new_row = pd.DataFrame([{"Date": today_date_str, "Timestamp": now_ts, "Time": now_time_str, "PCR": current_pcr, "Vol_PCR": vol_pcr, "Delta_PCR_5m": 0.0, "Delta_PCR_15m": dp_15m, "Total_CE_OI": total_ce_oi_sum, "Total_PE_OI": total_pe_oi_sum}])
@@ -561,7 +553,6 @@ if is_market_live:
 
     gex_df = st.session_state["gex_history"]
     if gex_df.empty or str(gex_df.iloc[-1]["Time"]) != now_time_str:
-        gex_df["Timestamp"] = pd.to_numeric(gex_df["Timestamp"], errors='coerce').fillna(0)
         z_gex = (df_oc["Net_GEX"].sum() - gex_df["Total_Net_GEX"].tail(20).mean()) / max(gex_df["Total_Net_GEX"].tail(20).std(), 1e-6) if len(gex_df) >= 2 else 0.0
         new_row = pd.DataFrame([{"Date": today_date_str, "Timestamp": now_ts, "Time": now_time_str, "Total_Net_GEX": df_oc["Net_GEX"].sum(), "Z_GEX": z_gex, "Flip_Strike": gamma_flip_strike, "Spot": spot_price, "Max_Pain": max_pain_strike}])
         st.session_state["gex_history"] = pd.concat([gex_df, new_row], ignore_index=True)
@@ -569,9 +560,8 @@ if is_market_live:
 
     doi_df = st.session_state["delta_oi_history"]
     if doi_df.empty or str(doi_df.iloc[-1]["Time"]) != now_time_str:
-        doi_df["Timestamp"] = pd.to_numeric(doi_df["Timestamp"], errors='coerce').fillna(0)
-        past_doi_1m = doi_df[doi_df["Timestamp"] <= now_ts - 60]
-        past_doi_5m = doi_df[doi_df["Timestamp"] <= now_ts - 300]
+        past_doi_1m = doi_df[doi_df["Timestamp"].apply(safe_float) <= now_ts - 60] if "Timestamp" in doi_df.columns else pd.DataFrame()
+        past_doi_5m = doi_df[doi_df["Timestamp"].apply(safe_float) <= now_ts - 300] if "Timestamp" in doi_df.columns else pd.DataFrame()
         d_roc_1m = df_oc["Net_Delta_OI"].sum() - past_doi_1m.iloc[-1]["Total_Net_Delta_OI"] if not past_doi_1m.empty else 0.0
         dex_vel = (df_oc["Net_DEX"].sum()) - past_doi_5m.iloc[-1]["Total_Net_DEX"] if not past_doi_5m.empty else 0.0
         
@@ -711,15 +701,15 @@ with tab1: # PRINCE ANALYSIS
     
     if not abs_df.empty:
         current_row = abs_df.iloc[-1]
-        now_ts_abs = current_row["Timestamp"]
+        now_ts_abs = safe_float(current_row["Timestamp"])
         
         for w in windows:
             target_ts = now_ts_abs - (w * 60)
-            past_df = abs_df[abs_df["Timestamp"] <= target_ts]
+            past_df = abs_df[abs_df["Timestamp"].apply(safe_float) <= target_ts]
             
             if not past_df.empty:
                 past_row = past_df.iloc[-1]
-                actual_min = int((now_ts_abs - past_row["Timestamp"]) / 60)
+                actual_min = int((now_ts_abs - safe_float(past_row["Timestamp"])) / 60)
                 
                 d_fut = current_row["Fut_LTP"] - past_row["Fut_LTP"]
                 d_ce_oi = current_row["CE_OI"] - past_row["CE_OI"]
@@ -752,11 +742,11 @@ with tab1: # PRINCE ANALYSIS
     mins = int(b_win.replace("m", "").replace("H", "")) * (60 if "H" in b_win else 1)
     target_ts = int(time.time()) - (mins * 60)
     
-    past_df = oi_snap[oi_snap["Timestamp"] <= target_ts]
+    past_df = oi_snap[oi_snap["Timestamp"].apply(safe_float) <= target_ts]
     
     if not past_df.empty:
         closest_ts = past_df["Timestamp"].max()
-        actual_mins = int((int(time.time()) - closest_ts) / 60)
+        actual_mins = int((int(time.time()) - safe_float(closest_ts)) / 60)
         if actual_mins != mins: st.caption(f"ℹ️ Displaying maximum available history: **{actual_mins} minutes**.")
 
         past_oi = past_df[past_df["Timestamp"] == closest_ts]
