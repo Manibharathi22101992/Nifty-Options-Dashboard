@@ -53,6 +53,7 @@ if not CLIENT_ID or not ACCESS_TOKEN:
     st.error("⚠️ API credentials missing. Please update your Streamlit Secrets.")
     st.stop()
 
+# Professional Constants
 NIFTY_LOT_SIZE = 65
 NIFTY_DIVIDEND_YIELD = 0.012  
 RISK_FREE_RATE = 0.07         
@@ -120,10 +121,12 @@ st.markdown(
 # ---------------------------------------------------------
 # 3. HELPER FUNCTIONS & CHART ENGINE
 # ---------------------------------------------------------
-def make_dt(df):
-    """Guarantees chronological sorting in Plotly by merging Date + Time into true Datetimes."""
-    if df.empty: return []
-    return pd.to_datetime(df["Date"].astype(str) + " " + df["Time"].astype(str))
+def get_sorted_dt(df):
+    """Guarantees chronological sorting to completely eliminate zigzag lines."""
+    if df.empty: return df
+    res = df.copy()
+    res["Datetime"] = pd.to_datetime(res["Date"].astype(str) + " " + res["Time"].astype(str), errors='coerce')
+    return res.dropna(subset=['Datetime']).sort_values("Datetime")
 
 def safe_float(val, default=0.0):
     try:
@@ -145,16 +148,10 @@ def apply_dark_layout(fig, height=250, is_strike_axis=False, df_filtered=None, a
     fig.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", margin=dict(l=5, r=5, t=20, b=5), height=height, legend=dict(orientation="h", y=1.1, x=0, font=dict(size=10)), bargap=0.15)
     
     if is_strike_axis and df_filtered is not None and not df_filtered.empty:
-        # Bypasses "24.2k" formatting and locks labels directly to the integers
-        fig.update_xaxes(
-            tickmode='array', 
-            tickvals=df_filtered["Strike"], 
-            ticktext=df_filtered["Strike"].astype(str), 
-            tickangle=-45, 
-            gridcolor="#2A2E39", 
-            zerolinecolor="#2A2E39", 
-            tickfont=dict(size=10, color="#D1D4DC")
-        )
+        # Absolutely forces Plotly to render exact integers (e.g., 24200 instead of 24.2k)
+        strikes = df_filtered["Strike"].astype(int).tolist()
+        strike_strs = [str(x) for x in strikes]
+        fig.update_xaxes(tickmode='array', tickvals=strikes, ticktext=strike_strs, tickangle=-45, gridcolor="#2A2E39", zerolinecolor="#2A2E39", tickfont=dict(size=10, color="#D1D4DC"))
     else:
         fig.update_xaxes(gridcolor="#2A2E39", zerolinecolor="#2A2E39", tickfont=dict(size=10))
         
@@ -308,8 +305,12 @@ def fetch_gex_option_chain_raw(expiry_date):
         oc_raw = data.get("data", {}).get("oc", {})
         if not oc_raw: return get_empty_oc_df(), spot_price, "Empty options chain."
 
-        try: exp_date_obj = pd.to_datetime(str(expiry_date)[:10], dayfirst=True).date()
-        except: exp_date_obj = datetime.date.today() + datetime.timedelta(days=1)
+        try: 
+            clean_date = str(expiry_date).replace(".", "-").strip()
+            exp_date_obj = pd.to_datetime(clean_date, dayfirst=True).date()
+        except: 
+            exp_date_obj = datetime.date.today() + datetime.timedelta(days=1)
+            
         T_years = max((exp_date_obj - datetime.date.today()).days, 0.5) / 365.0
         
         records = []
@@ -370,19 +371,27 @@ def fetch_gex_option_chain_raw(expiry_date):
 def fetch_multi_expiry_vol_structure(spot_price, valid_exp_list):
     vol_data, surface_data = [], []
     for idx, exp in enumerate(valid_exp_list):
-        if idx > 0: time.sleep(0.1) # Fast non-blocking fetch to prevent UI blinking
+        if idx > 0: time.sleep(0.1) # Fast non-blocking fetch
         df_exp, exp_spot, _ = fetch_gex_option_chain_raw(exp)
         if not df_exp.empty:
             temp_spot_atm = int(round(exp_spot / 50) * 50)
             atm_row = df_exp[df_exp["Strike"] == temp_spot_atm]
             mean_iv = (atm_row["CE_IV"].values[0] + atm_row["PE_IV"].values[0]) / 2.0 if not atm_row.empty else (df_exp["CE_IV"].mean() + df_exp["PE_IV"].mean()) / 2.0
             
-            try: exp_date_obj = pd.to_datetime(str(exp)[:10], dayfirst=True).date()
-            except: continue
+            try: 
+                # Strict parser prevents '09 Jan' bug
+                clean_str = str(exp).replace(".", "-").strip()
+                exp_date_obj = pd.to_datetime(clean_str, dayfirst=True).date()
+            except: 
+                continue
             
-            days = max((exp_date_obj - datetime.date.today()).days, 0)
+            days = (exp_date_obj - datetime.date.today()).days
+            if days < 0:
+                continue # Block past dates entirely
+                
             tenor_years = max(days, 0.5) / 365.0
             vol_data.append({"Expiry": exp_date_obj.strftime("%d %b"), "Days": days, "Tenor_Years": tenor_years, "Mean_IV": max(mean_iv, 0.01)})
+            
             for _, r in df_exp.iterrows():
                 if temp_spot_atm - 600 <= r["Strike"] <= temp_spot_atm + 600: surface_data.append({"Expiry": exp, "Days": days, "Strike": r["Strike"], "IV": (r["CE_IV"] + r["PE_IV"]) / 2.0})
 
@@ -551,7 +560,7 @@ st.markdown(f"""
 # ---------------------------------------------------------
 # 7. METRICS COMPILATION
 # ---------------------------------------------------------
-try: exp_date = pd.to_datetime(str(selected_expiry)[:10], dayfirst=True).date()
+try: exp_date = pd.to_datetime(str(selected_expiry).replace(".", "-").strip()[:10], dayfirst=True).date()
 except: exp_date = datetime.date.today() + datetime.timedelta(days=1)
 T_years = max((exp_date - datetime.date.today()).days, 0.5) / 365.0
 
@@ -717,7 +726,7 @@ with tab1: # PRINCE ANALYSIS
             fig_fwd.add_trace(go.Scatter(x=df_vol_struct["Expiry"], y=df_vol_struct["Forward_Vol"], mode="lines+markers", name="Forward Vol", line=dict(color="#00E676", width=2.5)))
             fig_fwd.add_trace(go.Scatter(x=df_vol_struct["Expiry"], y=df_vol_struct["Mean_IV"], mode="lines+markers", name="Mean IV", line=dict(color="#AB47BC", width=2.5, dash="dot")))
             st.plotly_chart(apply_dark_layout(fig_fwd), use_container_width=True, config=PLOT_CONFIG, key="chart_fwd_vol")
-        else: st.info("Loading Term Structure Data... (Takes ~0.6 seconds)")
+        else: st.info("Loading Term Structure Data...")
         st.markdown('</div>', unsafe_allow_html=True)
         
     with v2:
@@ -725,9 +734,7 @@ with tab1: # PRINCE ANALYSIS
         st.markdown('<div class="interp-box">💡 <b>Interpretation:</b> Rising Spot + Falling IV indicates strong bullish momentum supported by volatility crush.</div>', unsafe_allow_html=True)
         fig_iv_price = make_subplots(specs=[[{"secondary_y": True}]])
         if not atm_iv_df.empty:
-            sorted_atm_iv = atm_iv_df.copy()
-            sorted_atm_iv["Datetime"] = make_dt(sorted_atm_iv)
-            sorted_atm_iv = sorted_atm_iv.sort_values("Datetime")
+            sorted_atm_iv = get_sorted_dt(atm_iv_df)
             fig_iv_price.add_trace(go.Scatter(x=sorted_atm_iv["Datetime"], y=sorted_atm_iv["ATM_IV"]*100, mode="lines", name="ATM IV", line=dict(color="#AB47BC", width=2)), secondary_y=False)
             fig_iv_price.add_trace(go.Scatter(x=sorted_atm_iv["Datetime"], y=sorted_atm_iv["Spot"], mode="lines", name="Price", line=dict(color="#FF5252", width=2)), secondary_y=True)
         fig_iv_price.update_yaxes(title_text="ATM IV (%)", secondary_y=False, gridcolor="#2A2E39")
@@ -927,8 +934,8 @@ with tab3: # INTRADAY & ADVANCED ANALYTICS
         if not iv_hist.empty: 
             strike_history = iv_hist[iv_hist["Strike"] == selected_target_strike].copy()
             if not strike_history.empty:
-                strike_history["Datetime"] = make_dt(strike_history)
-                fig_ts.add_trace(go.Scatter(x=strike_history["Datetime"], y=strike_history["IV_Spread"], mode="lines+markers", line=dict(color="#29B6F6", width=2), marker=dict(size=3)))
+                strike_history_dt = get_sorted_dt(strike_history)
+                fig_ts.add_trace(go.Scatter(x=strike_history_dt["Datetime"], y=strike_history_dt["IV_Spread"], mode="lines+markers", line=dict(color="#29B6F6", width=2), marker=dict(size=3)))
         fig_ts.add_hline(y=0, line_dash="dash", line_color="white", opacity=0.3)
         st.plotly_chart(apply_dark_layout(fig_ts), use_container_width=True, config=PLOT_CONFIG, key="chart_iv_spread")
         st.markdown('</div>', unsafe_allow_html=True)
@@ -936,8 +943,7 @@ with tab3: # INTRADAY & ADVANCED ANALYTICS
         st.markdown('<div class="chart-container"><div class="chart-title">15-Min PCR Velocity (ΔPCR)</div>', unsafe_allow_html=True)
         fig_pcr = go.Figure()
         if not pcr_df.empty: 
-            pcr_df_dt = pcr_df.copy()
-            pcr_df_dt["Datetime"] = make_dt(pcr_df_dt)
+            pcr_df_dt = get_sorted_dt(pcr_df)
             fig_pcr.add_trace(go.Bar(x=pcr_df_dt["Datetime"], y=pcr_df_dt["Delta_PCR_15m"], marker_color=["#00E676" if v >= 0.15 else ("#FF5252" if v <= -0.15 else "#8A93A6") for v in pcr_df_dt["Delta_PCR_15m"]]))
         fig_pcr.add_hline(y=0.15, line_dash="dash", line_color="#00E676"); fig_pcr.add_hline(y=-0.15, line_dash="dash", line_color="#FF5252")
         st.plotly_chart(apply_dark_layout(fig_pcr), use_container_width=True, config=PLOT_CONFIG, key="chart_pcr_vel")
@@ -948,8 +954,7 @@ with tab3: # INTRADAY & ADVANCED ANALYTICS
         st.markdown('<div class="chart-container"><div class="chart-title">Cumulative Open Interest Trend (Cr)</div>', unsafe_allow_html=True)
         fig_oi_trend = go.Figure()
         if not pcr_df.empty:
-            pcr_df_dt = pcr_df.copy()
-            pcr_df_dt["Datetime"] = make_dt(pcr_df_dt)
+            pcr_df_dt = get_sorted_dt(pcr_df)
             fig_oi_trend.add_trace(go.Scatter(x=pcr_df_dt["Datetime"], y=pcr_df_dt["Total_PE_OI"]/1e7, mode="lines", name="Put OI (PE)", line=dict(color="#FF5252", width=2)))
             fig_oi_trend.add_trace(go.Scatter(x=pcr_df_dt["Datetime"], y=pcr_df_dt["Total_CE_OI"]/1e7, mode="lines", name="Call OI (CE)", line=dict(color="#00E676", width=2)))
             fig_oi_trend.add_trace(go.Scatter(x=pcr_df_dt["Datetime"], y=(pcr_df_dt["Total_PE_OI"]-pcr_df_dt["Total_CE_OI"])/1e7, mode="lines", name="PE-CE Diff", line=dict(color="#AB47BC", width=2)))
@@ -959,8 +964,7 @@ with tab3: # INTRADAY & ADVANCED ANALYTICS
         st.markdown('<div class="chart-container"><div class="chart-title">Intraday PCR & Vol PCR Trend</div>', unsafe_allow_html=True)
         fig_pcr_t = go.Figure()
         if not pcr_df.empty:
-            pcr_df_dt = pcr_df.copy()
-            pcr_df_dt["Datetime"] = make_dt(pcr_df_dt)
+            pcr_df_dt = get_sorted_dt(pcr_df)
             fig_pcr_t.add_trace(go.Scatter(x=pcr_df_dt["Datetime"], y=pcr_df_dt["PCR"], mode="lines", name="OI PCR", line=dict(color="#29B6F6", width=2)))
             if "Vol_PCR" in pcr_df_dt.columns: fig_pcr_t.add_trace(go.Scatter(x=pcr_df_dt["Datetime"], y=pcr_df_dt["Vol_PCR"], mode="lines", name="Vol PCR", line=dict(color="#FFA726", width=2)))
         st.plotly_chart(apply_dark_layout(fig_pcr_t), use_container_width=True, config=PLOT_CONFIG, key="chart_pcr_trend")
@@ -972,8 +976,7 @@ with tab3: # INTRADAY & ADVANCED ANALYTICS
         st.markdown('<div class="interp-box">💡 <b>Delta-Weighted OI:</b> <span style="color:var(--green);">Positive = Market Makers are Long Delta (Bullish).</span> <span style="color:var(--red);">Negative = Market Makers are Short Delta (Bearish).</span></div>', unsafe_allow_html=True)
         fig_doi = go.Figure()
         if not doi_df.empty: 
-            doi_df_dt = doi_df.copy()
-            doi_df_dt["Datetime"] = make_dt(doi_df_dt)
+            doi_df_dt = get_sorted_dt(doi_df)
             fig_doi.add_trace(go.Scatter(x=doi_df_dt["Datetime"], y=doi_df_dt["Total_Net_Delta_OI"], mode="lines", fill='tozeroy', line=dict(color="#00E676", width=2)))
         fig_doi.add_hline(y=0, line_dash="dash", line_color="white", opacity=0.3)
         st.plotly_chart(apply_dark_layout(fig_doi), use_container_width=True, config=PLOT_CONFIG, key="chart_net_doi")
@@ -983,8 +986,7 @@ with tab3: # INTRADAY & ADVANCED ANALYTICS
         st.markdown('<div class="interp-box">💡 Tracks the 5-minute rate of change of Dealer Delta Exposure to detect rapid hedging moves.</div>', unsafe_allow_html=True)
         fig_dvel = go.Figure()
         if not doi_df.empty: 
-            doi_df_dt = doi_df.copy()
-            doi_df_dt["Datetime"] = make_dt(doi_df_dt)
+            doi_df_dt = get_sorted_dt(doi_df)
             fig_dvel.add_trace(go.Bar(x=doi_df_dt["Datetime"], y=doi_df_dt["DEX_Vel_5m"], marker_color=["#00E676" if v >= 0 else "#FF5252" for v in doi_df_dt["DEX_Vel_5m"]]))
         fig_dvel.add_hline(y=0, line_dash="dash", line_color="white", opacity=0.3)
         st.plotly_chart(apply_dark_layout(fig_dvel), use_container_width=True, config=PLOT_CONFIG, key="chart_dex_vel")
@@ -995,8 +997,7 @@ with tab3: # INTRADAY & ADVANCED ANALYTICS
         st.markdown('<div class="chart-container"><div class="chart-title">Put-Call Parity Discrepancy Index (PCP_Dev)</div>', unsafe_allow_html=True)
         fig_pcp = go.Figure()
         if not synth_df.empty:
-            synth_df_dt = synth_df.copy()
-            synth_df_dt["Datetime"] = make_dt(synth_df_dt)
+            synth_df_dt = get_sorted_dt(synth_df)
             fig_pcp.add_trace(go.Bar(x=synth_df_dt["Datetime"], y=synth_df_dt["PCP_Dev_Mean"], marker_color=["#00E676" if v > 0 else "#FF5252" for v in synth_df_dt["PCP_Dev_Mean"]]))
         fig_pcp.add_hline(y=3.0, line_dash="dash", line_color="#00E676", annotation_text="+3.0 Call Squeeze")
         fig_pcp.add_hline(y=-3.0, line_dash="dash", line_color="#FF5252", annotation_text="-3.0 Put Squeeze")
@@ -1006,8 +1007,7 @@ with tab3: # INTRADAY & ADVANCED ANALYTICS
         st.markdown('<div class="chart-container"><div class="chart-title">Multi-Strike Synthetic Parity Engine</div>', unsafe_allow_html=True)
         fig_synth = go.Figure()
         if not synth_df.empty:
-            synth_df_dt = synth_df.copy()
-            synth_df_dt["Datetime"] = make_dt(synth_df_dt)
+            synth_df_dt = get_sorted_dt(synth_df)
             fig_synth.add_trace(go.Scatter(x=synth_df_dt["Datetime"], y=synth_df_dt["Spot"], mode="lines", name="Spot", line=dict(color="#FFD700", width=2)))
             fig_synth.add_trace(go.Scatter(x=synth_df_dt["Datetime"], y=synth_df_dt["Synth_M50"], mode="lines", name="ITM Synth", line=dict(color="#00E676", width=1.5, dash="dot")))
             fig_synth.add_trace(go.Scatter(x=synth_df_dt["Datetime"], y=synth_df_dt["Synth_ATM"], mode="lines", name="ATM Synth", line=dict(color="#29B6F6", width=1.5, dash="dot")))
@@ -1020,14 +1020,12 @@ with tab3: # INTRADAY & ADVANCED ANALYTICS
         st.markdown('<div class="chart-container"><div class="chart-title">Fyers ATM Straddle LTP vs Straddle VWAP</div>', unsafe_allow_html=True)
         fig_fyers_strad = make_subplots(specs=[[{"secondary_y": True}]])
         if not strad_df.empty:
-            strad_df_dt = strad_df.copy()
-            strad_df_dt["Datetime"] = make_dt(strad_df_dt)
+            strad_df_dt = get_sorted_dt(strad_df)
             fig_fyers_strad.add_trace(go.Scatter(x=strad_df_dt["Datetime"], y=strad_df_dt["Actual_Straddle"], mode="lines", name="ATM Straddle LTP", line=dict(color="#FF5252", width=2)), secondary_y=False)
             if "Straddle_VWAP" in strad_df_dt.columns:
                 fig_fyers_strad.add_trace(go.Scatter(x=strad_df_dt["Datetime"], y=strad_df_dt["Straddle_VWAP"], mode="lines", name="Straddle VWAP", line=dict(color="#00E676", width=1.5, dash="dot")), secondary_y=False)
             if not synth_df.empty:
-                synth_df_dt = synth_df.copy()
-                synth_df_dt["Datetime"] = make_dt(synth_df_dt)
+                synth_df_dt = get_sorted_dt(synth_df)
                 fig_fyers_strad.add_trace(go.Scatter(x=synth_df_dt["Datetime"], y=synth_df_dt["Spot"], mode="lines", name="Nifty Price", line=dict(color="#29B6F6", width=1.5, dash="dash")), secondary_y=True)
         fig_fyers_strad.update_yaxes(title_text="Straddle Premium (₹)", secondary_y=False, gridcolor="#2A2E39")
         fig_fyers_strad.update_yaxes(title_text="Nifty Price", secondary_y=True, showgrid=False)
@@ -1037,8 +1035,7 @@ with tab3: # INTRADAY & ADVANCED ANALYTICS
         st.markdown('<div class="chart-container"><div class="chart-title">Gamma Flip Migration (ΔFlip)</div>', unsafe_allow_html=True)
         fig_flip = go.Figure()
         if not gex_df.empty:
-            gex_df_dt = gex_df.copy()
-            gex_df_dt["Datetime"] = make_dt(gex_df_dt)
+            gex_df_dt = get_sorted_dt(gex_df)
             fig_flip.add_trace(go.Scatter(x=gex_df_dt["Datetime"], y=gex_df_dt["Spot"], mode="lines", name="Spot", line=dict(color="#FFD700", width=2)))
             fig_flip.add_trace(go.Scatter(x=gex_df_dt["Datetime"], y=gex_df_dt["Flip_Strike"], mode="lines", name="Flip Level", line=dict(color="#29B6F6", width=2, dash="dash")))
         st.plotly_chart(apply_dark_layout(fig_flip), use_container_width=True, config=PLOT_CONFIG, key="chart_gex_flip_mig")
@@ -1050,12 +1047,10 @@ with tab4: # OPENBULL & FYERS SKEW
         st.markdown('<div class="chart-container"><div class="chart-title">Fyers Multi-Day Macro Overlay (PCR vs Price)</div>', unsafe_allow_html=True)
         fig_macro = make_subplots(specs=[[{"secondary_y": True}]])
         if not pcr_df.empty:
-            pcr_df_dt = pcr_df.copy()
-            pcr_df_dt["Datetime"] = make_dt(pcr_df_dt)
+            pcr_df_dt = get_sorted_dt(pcr_df)
             fig_macro.add_trace(go.Scatter(x=pcr_df_dt["Datetime"], y=pcr_df_dt["PCR"], mode="lines", name="PCR", line=dict(color="#AB47BC", width=2)), secondary_y=False)
             if not gex_df.empty:
-                gex_df_dt = gex_df.copy()
-                gex_df_dt["Datetime"] = make_dt(gex_df_dt)
+                gex_df_dt = get_sorted_dt(gex_df)
                 fig_macro.add_trace(go.Scatter(x=gex_df_dt["Datetime"], y=gex_df_dt["Spot"], mode="lines", name="Nifty Price", line=dict(color="#FF5252", width=2)), secondary_y=True)
         fig_macro.update_yaxes(title_text="PCR", secondary_y=False, gridcolor="#2A2E39")
         fig_macro.update_yaxes(title_text="Nifty Price", secondary_y=True, showgrid=False)
@@ -1068,16 +1063,14 @@ with tab4: # OPENBULL & FYERS SKEW
         fig_ms_iv = make_subplots(specs=[[{"secondary_y": True}]])
         if not iv_hist.empty and selected_iv_strikes:
             colors_list = ["#AB47BC", "#00E676", "#29B6F6", "#FFA726", "#FF5252"]
-            iv_hist_dt = iv_hist.copy()
-            iv_hist_dt["Datetime"] = make_dt(iv_hist_dt)
+            iv_hist_dt = get_sorted_dt(iv_hist)
             for idx_s, st_val in enumerate(selected_iv_strikes):
                 st_h = iv_hist_dt[iv_hist_dt["Strike"] == st_val]
                 if not st_h.empty:
                     c_col = colors_list[idx_s % len(colors_list)]
                     fig_ms_iv.add_trace(go.Scatter(x=st_h["Datetime"], y=(st_h["CE_IV"]+st_h["PE_IV"])/2.0*100, mode="lines", name=f"IV ({st_val})", line=dict(color=c_col, width=1.5)), secondary_y=False)
             if not synth_df.empty:
-                synth_df_dt = synth_df.copy()
-                synth_df_dt["Datetime"] = make_dt(synth_df_dt)
+                synth_df_dt = get_sorted_dt(synth_df)
                 fig_ms_iv.add_trace(go.Scatter(x=synth_df_dt["Datetime"], y=synth_df_dt["Spot"], mode="lines", name="Nifty Price", line=dict(color="#29B6F6", width=2)), secondary_y=True)
         fig_ms_iv.update_yaxes(title_text="Implied Volatility (%)", secondary_y=False, gridcolor="#2A2E39")
         fig_ms_iv.update_yaxes(title_text="Nifty Price", secondary_y=True, showgrid=False)
