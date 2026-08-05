@@ -378,11 +378,6 @@ def check_and_reset(df_name, cols, today_date_str, now_time_str):
     if not df.empty and str(df.iloc[-1]["Date"]) != today_date_str and now_time_str >= "09:15:00":
         df = pd.DataFrame(columns=cols)
         save_persisted_df(df, df_name)
-        
-    # Force Timestamp strictly to numeric to bypass Streamlit Cloud PyArrow string parsing crashes
-    if "Timestamp" in df.columns and not df.empty:
-        df["Timestamp"] = pd.to_numeric(df["Timestamp"], errors='coerce').fillna(0).astype(int)
-        
     return df
 
 @st.cache_data(ttl=60)
