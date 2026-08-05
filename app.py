@@ -54,13 +54,6 @@ except Exception as e:
     YF_AVAILABLE = False
     log_error(f"yFinance Import Failed: {e}")
 
-try:
-    from scipy.stats import norm
-    SCIPY_AVAILABLE = True
-except Exception as e:
-    SCIPY_AVAILABLE = False
-    log_error(f"Scipy missing. Fallback to math.erf (slower).")
-
 NIFTY_50_WEIGHTS = {
     "HDFCBANK.NS": 11.6, "RELIANCE.NS": 9.8, "ICICIBANK.NS": 7.9, "INFY.NS": 5.8, "ITC.NS": 4.5,
     "TCS.NS": 4.1, "LT.NS": 3.4, "AXISBANK.NS": 3.2, "KOTAKBANK.NS": 2.8, "SBIN.NS": 2.7,
@@ -126,11 +119,18 @@ def fmt_num(val):
     return f"{sign}{abs_val:.0f}"
 
 def apply_dark_layout(fig, height=250, is_strike_axis=False, df_filtered=None, atm_strike=None):
-    fig.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", margin=dict(l=5, r=5, t=20, b=5), height=height, legend=dict(orientation="h", y=1.1, x=0, font=dict(size=10)), bargap=0.15)
+    fig.update_layout(
+        template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", 
+        margin=dict(l=5, r=5, t=20, b=5), height=height, 
+        legend=dict(orientation="h", y=1.1, x=0, font=dict(size=10)), bargap=0.15
+    )
     if is_strike_axis and df_filtered is not None and not df_filtered.empty:
-        fig.update_xaxes(tickmode='linear', dtick=50, tickangle=-45, gridcolor="#2A2E39", zerolinecolor="#2A2E39", tickfont=dict(size=10, color="#D1D4DC"))
+        fig.update_xaxes(
+            tickmode='linear', dtick=50, tickformat="d", tickangle=-45, 
+            gridcolor="#2A2E39", zerolinecolor="#2A2E39", tickfont=dict(size=10, color="#D1D4DC")
+        )
     else:
-        fig.update_xaxes(gridcolor="#2A2E39", zerolinecolor="#2A2E39", tickfont=dict(size=10))
+        fig.update_xaxes(gridcolor="#2A2E39", zerolinecolor="#2A2E39", tickfont=dict(size=10), tickformat="d")
     fig.update_yaxes(gridcolor="#2A2E39", zerolinecolor="#2A2E39", tickfont=dict(size=10))
     return fig
 
@@ -260,7 +260,6 @@ def get_resilient_session():
 API_SESSION = get_resilient_session()
 
 def get_empty_oc_df():
-    """Provides a safe empty dataframe if API fails to prevent hard crashes."""
     cols = ["Strike", "CE_LTP", "PE_LTP", "CE_OI", "PE_OI", "CE_OI_Chg", "PE_OI_Chg", "CE_Vol", "PE_Vol", 
             "CE_Delta", "PE_Delta", "Net_Delta_OI", "Net_DEX", "ABS_DEX", "Call_GEX", "Put_GEX", "Net_GEX", "ABS_GEX", 
             "CE_VEX", "PE_VEX", "Net_VEX", "CE_CHEX", "PE_CHEX", "Net_CHEX", "CE_SPEX", "PE_SPEX", "Net_SPEX", 
@@ -284,7 +283,7 @@ def fetch_gex_option_chain_raw(expiry_date):
 
         try: exp_date_obj = pd.to_datetime(str(expiry_date)[:10]).date()
         except: exp_date_obj = datetime.date.today() + datetime.timedelta(days=1)
-        T_years = max((exp_date_obj - datetime.date.today()).days, 1) / 365.0
+        T_years = max((exp_date_obj - datetime.date.today()).days, 0.5) / 365.0
         
         records = []
         for strike_str, details in oc_raw.items():
@@ -348,16 +347,17 @@ def fetch_gex_option_chain(expiry_date):
 def fetch_multi_expiry_vol_structure(spot_price, valid_exp_list):
     vol_data, surface_data = [], []
     for idx, exp in enumerate(valid_exp_list):
-        if idx > 0: time.sleep(0.2) # Fast, non-blocking rate limit compliance
+        if idx > 0: time.sleep(0.1)
         df_exp, exp_spot, _ = fetch_gex_option_chain_raw(exp)
         if not df_exp.empty:
             temp_spot_atm = int(round(exp_spot / 50) * 50)
             atm_row = df_exp[df_exp["Strike"] == temp_spot_atm]
-            mean_iv = (atm_row["CE_IV"].values[0] + atm_row["PE_IV"].values[0]) / 2.0 if not atm_row.empty else df_exp["CE_IV"].mean()
+            mean_iv = (atm_row["CE_IV"].values[0] + atm_row["PE_IV"].values[0]) / 2.0 if not atm_row.empty else (df_exp["CE_IV"].mean() + df_exp["PE_IV"].mean()) / 2.0
             try: exp_date_obj = pd.to_datetime(str(exp)[:10]).date()
             except: continue
-            days = max((exp_date_obj - datetime.date.today()).days, 1)
-            vol_data.append({"Expiry": exp_date_obj.strftime("%d %b"), "Days": days, "Tenor_Years": days / 365.0, "Mean_IV": max(mean_iv, 0.01)})
+            days = max((exp_date_obj - datetime.date.today()).days, 0)
+            tenor_years = max(days, 0.5) / 365.0
+            vol_data.append({"Expiry": exp_date_obj.strftime("%d %b"), "Days": days, "Tenor_Years": tenor_years, "Mean_IV": max(mean_iv, 0.01)})
             for _, r in df_exp.iterrows():
                 if temp_spot_atm - 600 <= r["Strike"] <= temp_spot_atm + 600: surface_data.append({"Expiry": exp, "Days": days, "Strike": r["Strike"], "IV": (r["CE_IV"] + r["PE_IV"]) / 2.0})
 
@@ -476,7 +476,6 @@ selected_expiry = st.sidebar.selectbox("Primary Expiry", valid_expiries) if vali
 GLOBAL_STATE["selected_expiry"] = selected_expiry
 start_background_daemon()
 
-# API FETCH (NEVER STOPS THE UI)
 df_oc, spot_price, error_remark = fetch_gex_option_chain(selected_expiry)
 
 for key, cols in [
@@ -487,23 +486,23 @@ for key, cols in [
     ("gex_history", ["Date", "Timestamp", "Time", "Total_Net_GEX", "Z_GEX", "Flip_Strike", "Spot", "Max_Pain"]),
     ("synth_history", ["Date", "Time", "Spot", "Strike_M50", "Strike_ATM", "Strike_P50", "Synth_M50", "Synth_ATM", "Synth_P50", "PCP_Dev_Mean"]),
     ("delta_oi_history", ["Date", "Timestamp", "Time", "Total_Net_Delta_OI", "Delta_OI_ROC_1m", "Total_Net_DEX", "DEX_Vel_5m"]),
-    ("straddle_history", ["Date", "Time", "Elapsed_Mins", "Actual_Straddle", "Expected_Straddle", "Regime", "Straddle_VWAP"])
+    ("straddle_history", ["Date", "Time", "Elapsed_Mins", "Actual_Straddle", "Expected_Straddle", "Regime", "Straddle_VWAP"]),
+    ("atm_iv_history", ["Date", "Timestamp", "Time", "Spot", "ATM_Strike", "ATM_IV"])
 ]:
     if key not in st.session_state: st.session_state[key] = check_and_reset(key, cols, today_date_str, now_time_str)
 
 if "straddle_anchor_price" not in st.session_state: st.session_state["straddle_anchor_price"] = None
 
 if st.sidebar.button("🗑️ Reset Session Cache"):
-    for key in ["absorption_history", "oi_snapshots", "iv_spread_history", "pcr_history", "gex_history", "synth_history", "delta_oi_history", "straddle_history"]:
+    for key in ["absorption_history", "oi_snapshots", "iv_spread_history", "pcr_history", "gex_history", "synth_history", "delta_oi_history", "straddle_history", "atm_iv_history"]:
         st.session_state[key] = pd.DataFrame(columns=st.session_state[key].columns)
     st.session_state["straddle_anchor_price"] = None
     st.cache_data.clear(); st.rerun()
 
 st.markdown("### PRINCE PAX DASHBOARD")
 
-# UI Graceful Fallback if API Drops
 if error_remark or df_oc.empty: 
-    st.error(f"⚠️ API Pipeline Offline: {error_remark or 'No Data'}. Showing structure with empty data. Reconnecting...")
+    st.error(f"⚠️ API Pipeline Offline: {error_remark or 'No Data'}. Reconnecting on next tick...")
     df_oc = get_empty_oc_df()
     spot_price = 0.0
 
@@ -522,7 +521,7 @@ st.markdown(f"""
 # ---------------------------------------------------------
 try: exp_date = pd.to_datetime(str(selected_expiry)[:10]).date()
 except: exp_date = datetime.date.today() + datetime.timedelta(days=1)
-T_years = max((exp_date - datetime.date.today()).days, 1) / 365.0
+T_years = max((exp_date - datetime.date.today()).days, 0.5) / 365.0
 
 synthetic_future = calculate_forward_price(spot_price, df_oc, T_years)
 atm_strike = int(round(synthetic_future / 50) * 50) if synthetic_future > 0 else 0
@@ -537,7 +536,7 @@ total_ce_oi_sum = df_oc["CE_OI"].sum() if not df_oc.empty else 0
 total_pe_oi_sum = df_oc["PE_OI"].sum() if not df_oc.empty else 0
 now_ts = int(time.time())
 
-# UI LIVE MEMORY INJECTION (PURE INTEGER TIMESTAMP COMPARISONS)
+# UI LIVE MEMORY INJECTION
 if is_market_live and not df_oc.empty:
     abs_df = st.session_state["absorption_history"]
     if abs_df.empty or (now_ts - safe_float(abs_df["Timestamp"].max()) >= 60):
@@ -557,6 +556,14 @@ if is_market_live and not df_oc.empty:
         new_ticks = [{"Date": today_date_str, "Time": now_time_str, "Strike": r["Strike"], "CE_IV": r["CE_IV"], "PE_IV": r["PE_IV"], "IV_Spread": r["IV_Spread"], "Spot": spot_price} for _, r in df_filtered.iterrows()]
         st.session_state["iv_spread_history"] = pd.concat([iv_hist, pd.DataFrame(new_ticks)], ignore_index=True)
         save_persisted_df(st.session_state["iv_spread_history"], "iv_spread_history")
+
+    atm_iv_df = st.session_state["atm_iv_history"]
+    if atm_iv_df.empty or str(atm_iv_df.iloc[-1]["Time"]) != now_time_str:
+        atm_row_cur = df_oc[df_oc["Strike"] == atm_strike]
+        cur_atm_iv = (atm_row_cur["CE_IV"].values[0] + atm_row_cur["PE_IV"].values[0]) / 2.0 if not atm_row_cur.empty else 0.0
+        new_atm_tick = pd.DataFrame([{"Date": today_date_str, "Timestamp": now_ts, "Time": now_time_str, "Spot": spot_price, "ATM_Strike": atm_strike, "ATM_IV": cur_atm_iv}])
+        st.session_state["atm_iv_history"] = pd.concat([atm_iv_df, new_atm_tick], ignore_index=True)
+        save_persisted_df(st.session_state["atm_iv_history"], "atm_iv_history")
         
     pcr_df = st.session_state["pcr_history"]
     current_pcr = total_pe_oi_sum / max(total_ce_oi_sum, 1)
@@ -612,7 +619,7 @@ if is_market_live and not df_oc.empty:
         save_persisted_df(st.session_state["synth_history"], "synth_history")
 
 # Load Memory explicitly for UI graphs
-abs_df, oi_snap, iv_hist, pcr_df, gex_df, doi_df, strad_df, synth_df = st.session_state["absorption_history"], st.session_state["oi_snapshots"], st.session_state["iv_spread_history"], st.session_state["pcr_history"], st.session_state["gex_history"], st.session_state["delta_oi_history"], st.session_state["straddle_history"], st.session_state["synth_history"]
+abs_df, oi_snap, iv_hist, pcr_df, gex_df, doi_df, strad_df, synth_df, atm_iv_df = st.session_state["absorption_history"], st.session_state["oi_snapshots"], st.session_state["iv_spread_history"], st.session_state["pcr_history"], st.session_state["gex_history"], st.session_state["delta_oi_history"], st.session_state["straddle_history"], st.session_state["synth_history"], st.session_state["atm_iv_history"]
 
 # PREMIUM HERO BANNER
 st.markdown(f'<div class="hero-banner"><div style="color:var(--text-muted); font-size:1.1rem; font-weight:800; letter-spacing:1px; margin-bottom:5px;">NIFTY SYNTHETIC FUTURE (TRUE FWD)</div><div style="color:var(--text-main); font-size:3.5rem; font-weight:900; letter-spacing:-1px; text-shadow: 0px 0px 10px rgba(255,255,255,0.1);">₹{synthetic_future:,.2f}</div><div style="color:var(--amber); font-size:1rem; font-weight:600; margin-top:5px;">Spot Market: ₹{spot_price:,.2f} &nbsp;&nbsp;|&nbsp;&nbsp; Interpolated Gamma Flip: {gamma_flip_strike:.1f}</div></div>', unsafe_allow_html=True)
@@ -651,12 +658,12 @@ gex_interp = "⚪ Sideways / Pinning" if tot_call_gex > tot_put_gex * 1.3 else (
 gex_col = "#FFD700" if "Sideways" in gex_interp else ("#FF5252" if "Acceleration" in gex_interp else "#00E676")
 
 h1, h2, h3, h4, h5, h6 = st.columns(6)
-h1.plotly_chart(create_h_bar("Total OI", tot_pe_oi, tot_ce_oi, oi_interp, oi_col), use_container_width=True)
-h2.plotly_chart(create_h_bar("OI Change (Full Day)", tot_pe_oichg, tot_ce_oichg, chg_interp, chg_col), use_container_width=True)
-h3.plotly_chart(create_h_bar("Volume", tot_pe_vol, tot_ce_vol, vol_interp, vol_col), use_container_width=True)
-h4.plotly_chart(create_h_bar("Theta Exp (CHEX)", tot_pe_chex, tot_ce_chex, chex_interp, chex_col), use_container_width=True)
-h5.plotly_chart(create_h_bar("Vega Exp (VEX)", tot_pe_vex, tot_ce_vex, vex_interp, vex_col), use_container_width=True)
-h6.plotly_chart(create_h_bar("Gamma Exp (GEX)", tot_put_gex, tot_call_gex, gex_interp, gex_col), use_container_width=True)
+h1.plotly_chart(create_h_bar("Total OI", tot_pe_oi, tot_ce_oi, oi_interp, oi_col), use_container_width=True, key="hbar_tot_oi")
+h2.plotly_chart(create_h_bar("OI Change (Full Day)", tot_pe_oichg, tot_ce_oichg, chg_interp, chg_col), use_container_width=True, key="hbar_oichg")
+h3.plotly_chart(create_h_bar("Volume", tot_pe_vol, tot_ce_vol, vol_interp, vol_col), use_container_width=True, key="hbar_vol")
+h4.plotly_chart(create_h_bar("Theta Exp (CHEX)", tot_pe_chex, tot_ce_chex, chex_interp, chex_col), use_container_width=True, key="hbar_chex")
+h5.plotly_chart(create_h_bar("Vega Exp (VEX)", tot_pe_vex, tot_ce_vex, vex_interp, vex_col), use_container_width=True, key="hbar_vex")
+h6.plotly_chart(create_h_bar("Gamma Exp (GEX)", tot_put_gex, tot_call_gex, gex_interp, gex_col), use_container_width=True, key="hbar_gex")
 
 # ---------------------------------------------------------
 # 9. MASTER TAB INTERFACE
@@ -677,22 +684,21 @@ with tab1: # PRINCE ANALYSIS
             fig_fwd = go.Figure()
             fig_fwd.add_trace(go.Scatter(x=df_vol_struct["Expiry"], y=df_vol_struct["Forward_Vol"], mode="lines+markers", name="Forward Vol", line=dict(color="#00E676", width=2.5)))
             fig_fwd.add_trace(go.Scatter(x=df_vol_struct["Expiry"], y=df_vol_struct["Mean_IV"], mode="lines+markers", name="Mean IV", line=dict(color="#AB47BC", width=2.5, dash="dot")))
-            st.plotly_chart(apply_dark_layout(fig_fwd), use_container_width=True, config=PLOT_CONFIG)
-        else: st.info("Loading Term Structure Data... (Takes ~0.6 seconds)")
+            st.plotly_chart(apply_dark_layout(fig_fwd), use_container_width=True, config=PLOT_CONFIG, key="chart_fwd_vol")
+        else: st.info("Loading Term Structure Data...")
         st.markdown('</div>', unsafe_allow_html=True)
         
     with v2:
         st.markdown('<div class="chart-container"><div class="chart-title">ATM IV vs Nifty Spot Price</div>', unsafe_allow_html=True)
         st.markdown('<div class="interp-box">💡 <b>Interpretation:</b> Rising Spot + Falling IV indicates strong bullish momentum supported by volatility crush.</div>', unsafe_allow_html=True)
         fig_iv_price = make_subplots(specs=[[{"secondary_y": True}]])
-        if not iv_hist.empty:
-            atm_hist = iv_hist[iv_hist["Strike"] == atm_strike]
-            if not atm_hist.empty:
-                fig_iv_price.add_trace(go.Scatter(x=atm_hist["Time"], y=(atm_hist["CE_IV"]+atm_hist["PE_IV"])/2.0*100, mode="lines", name="ATM IV", line=dict(color="#AB47BC", width=2)), secondary_y=False)
-                fig_iv_price.add_trace(go.Scatter(x=atm_hist["Time"], y=atm_hist["Spot"], mode="lines", name="Price", line=dict(color="#FF5252", width=2)), secondary_y=True)
+        if not atm_iv_df.empty:
+            sorted_atm_iv = atm_iv_df.sort_values("Timestamp")
+            fig_iv_price.add_trace(go.Scatter(x=sorted_atm_iv["Time"], y=sorted_atm_iv["ATM_IV"], mode="lines", name="ATM IV", line=dict(color="#AB47BC", width=2)), secondary_y=False)
+            fig_iv_price.add_trace(go.Scatter(x=sorted_atm_iv["Time"], y=sorted_atm_iv["Spot"], mode="lines", name="Price", line=dict(color="#FF5252", width=2)), secondary_y=True)
         fig_iv_price.update_yaxes(title_text="ATM IV (%)", secondary_y=False, gridcolor="#2A2E39")
         fig_iv_price.update_yaxes(title_text="Nifty Price", secondary_y=True, showgrid=False)
-        st.plotly_chart(apply_dark_layout(fig_iv_price), use_container_width=True, config=PLOT_CONFIG)
+        st.plotly_chart(apply_dark_layout(fig_iv_price), use_container_width=True, config=PLOT_CONFIG, key="chart_atm_iv_spot")
         st.markdown('</div>', unsafe_allow_html=True)
 
     oi_col1, oi_col2 = st.columns(2)
@@ -704,7 +710,7 @@ with tab1: # PRINCE ANALYSIS
             fig_oi_prof.add_trace(go.Bar(x=df_chart_view["Strike"], y=df_chart_view["CE_OI"], name="Call OI (CE)", marker_color="#00E676"))
             fig_oi_prof.add_vline(x=spot_price, line_dash="solid", line_color="#FFD700")
             fig_oi_prof.update_layout(barmode='group')
-        st.plotly_chart(apply_dark_layout(fig_oi_prof, 250, True, df_chart_view, atm_strike), use_container_width=True, config=PLOT_CONFIG)
+        st.plotly_chart(apply_dark_layout(fig_oi_prof, 250, True, df_chart_view, atm_strike), use_container_width=True, config=PLOT_CONFIG, key="chart_oi_prof")
         st.markdown('</div>', unsafe_allow_html=True)
     with oi_col2:
         st.markdown('<div class="chart-container"><div class="chart-title">OI Change Tracker (Full Day)</div>', unsafe_allow_html=True)
@@ -714,7 +720,7 @@ with tab1: # PRINCE ANALYSIS
             fig_oichg_prof.add_trace(go.Bar(x=df_chart_view["Strike"], y=df_chart_view.get("CE_OI_Chg_Calc", df_chart_view["CE_OI_Chg"]), name="Call OI Chg", marker_color="#00E676"))
             fig_oichg_prof.add_vline(x=spot_price, line_dash="solid", line_color="#FFD700")
             fig_oichg_prof.update_layout(barmode='group')
-        st.plotly_chart(apply_dark_layout(fig_oichg_prof, 250, True, df_chart_view, atm_strike), use_container_width=True, config=PLOT_CONFIG)
+        st.plotly_chart(apply_dark_layout(fig_oichg_prof, 250, True, df_chart_view, atm_strike), use_container_width=True, config=PLOT_CONFIG, key="chart_oichg_prof")
         st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="chart-container" style="padding-bottom:10px;"><div class="chart-title">Intraday Absorption Engine (Synth Fut vs Options)</div>', unsafe_allow_html=True)
@@ -814,10 +820,18 @@ with tab2: # GREEK EXPOSURES
         fig_gex.add_trace(go.Scatter(x=df_chart_view["Strike"], y=df_chart_view["ABS_GEX"], mode="lines", name="Absolute GEX", line=dict(color="#29B6F6", width=3, shape="spline", smoothing=1.3)))
         y_max_gex = max(df_chart_view["ABS_GEX"].max() if not df_chart_view.empty else 1, df_chart_view["Net_GEX"].max() if not df_chart_view.empty else 1) * 1.25
         fig_gex.add_vline(x=spot_price, line_dash="solid", line_color="#FFD700"); fig_gex.add_annotation(x=spot_price, y=y_max_gex*0.95, text=f"Spot: {spot_price:.1f}", showarrow=False, font=dict(color="#FFD700", size=11))
-        fig_gex.add_vline(x=gamma_flip_strike, line_dash="dash", line_color="#29B6F6"); fig_gex.add_annotation(x=gamma_flip_strike, y=y_max_gex*0.85, text=f"Flip: {gamma_flip_strike:.1f}", showarrow=False, font=dict(color="#29B6F6", size=11))
+        
+        # Clamp Gamma Flip strictly within chart bounds to prevent scale blowout
+        if df_chart_view["Strike"].min() <= gamma_flip_strike <= df_chart_view["Strike"].max():
+            fig_gex.add_vline(x=gamma_flip_strike, line_dash="dash", line_color="#29B6F6"); fig_gex.add_annotation(x=gamma_flip_strike, y=y_max_gex*0.85, text=f"Flip: {gamma_flip_strike:.1f}", showarrow=False, font=dict(color="#29B6F6", size=11))
+        
         fig_gex.add_vline(x=call_wall_gex, line_dash="dash", line_color="#00E676"); fig_gex.add_annotation(x=call_wall_gex, y=y_max_gex*0.65, text=f"Call Wall: {call_wall_gex}", showarrow=False, font=dict(color="#00E676", size=11))
         fig_gex.add_vline(x=put_wall_gex, line_dash="dash", line_color="#FF5252"); fig_gex.add_annotation(x=put_wall_gex, y=y_max_gex*0.55, text=f"Put Wall: {put_wall_gex}", showarrow=False, font=dict(color="#FF5252", size=11))
-    st.plotly_chart(apply_dark_layout(fig_gex, 450, True, df_chart_view, atm_strike), use_container_width=True, config=PLOT_CONFIG)
+        
+        # Force strict visual bounds around ATM
+        fig_gex.update_xaxes(range=[atm_strike - 350, atm_strike + 350], tickformat="d")
+
+    st.plotly_chart(apply_dark_layout(fig_gex, 450, True, df_chart_view, atm_strike), use_container_width=True, config=PLOT_CONFIG, key="chart_gex_top")
     st.markdown('</div>', unsafe_allow_html=True)
 
     e1, e2 = st.columns(2)
@@ -834,7 +848,8 @@ with tab2: # GREEK EXPOSURES
             fig_dex.add_vline(x=spot_price, line_dash="solid", line_color="#FFD700"); fig_dex.add_annotation(x=spot_price, y=y_max_dex*0.95, text=f"Spot: {spot_price:.1f}", showarrow=False, font=dict(color="#FFD700", size=9))
             fig_dex.add_vline(x=call_wall_dex, line_dash="dash", line_color="#00E676"); fig_dex.add_annotation(x=call_wall_dex, y=y_max_dex*0.85, text=f"Call Wall: {call_wall_dex}", showarrow=False, font=dict(color="#00E676", size=9))
             fig_dex.add_vline(x=put_wall_dex, line_dash="dash", line_color="#FF5252"); fig_dex.add_annotation(x=put_wall_dex, y=y_max_dex*0.75, text=f"Put Wall: {put_wall_dex}", showarrow=False, font=dict(color="#FF5252", size=9))
-        st.plotly_chart(apply_dark_layout(fig_dex, 350, True, df_chart_view, atm_strike), use_container_width=True, config=PLOT_CONFIG)
+            fig_dex.update_xaxes(range=[atm_strike - 350, atm_strike + 350], tickformat="d")
+        st.plotly_chart(apply_dark_layout(fig_dex, 350, True, df_chart_view, atm_strike), use_container_width=True, config=PLOT_CONFIG, key="chart_dex")
         st.markdown('</div>', unsafe_allow_html=True)
     with e2:
         st.markdown('<div class="chart-container"><div class="chart-title">Tradytics Vanna Exposure (VEX)</div>', unsafe_allow_html=True)
@@ -846,7 +861,8 @@ with tab2: # GREEK EXPOSURES
             fig_vex.add_trace(go.Bar(x=df_chart_view["Strike"], y=df_chart_view["PE_VEX"], name="Put VEX (PE)", marker_color="#FF5252"))
             fig_vex.add_trace(go.Bar(x=df_chart_view["Strike"], y=df_chart_view["CE_VEX"], name="Call VEX (CE)", marker_color="#00E676"))
             fig_vex.update_layout(barmode='group')
-        st.plotly_chart(apply_dark_layout(fig_vex, 350, True, df_chart_view, atm_strike), use_container_width=True, config=PLOT_CONFIG)
+            fig_vex.update_xaxes(range=[atm_strike - 350, atm_strike + 350], tickformat="d")
+        st.plotly_chart(apply_dark_layout(fig_vex, 350, True, df_chart_view, atm_strike), use_container_width=True, config=PLOT_CONFIG, key="chart_vex")
         st.markdown('</div>', unsafe_allow_html=True)
 
     e3, e4 = st.columns(2)
@@ -860,7 +876,8 @@ with tab2: # GREEK EXPOSURES
             fig_chex.add_trace(go.Bar(x=df_chart_view["Strike"], y=df_chart_view["PE_CHEX"], name="Put CHEX (PE)", marker_color="#FF5252"))
             fig_chex.add_trace(go.Bar(x=df_chart_view["Strike"], y=df_chart_view["CE_CHEX"], name="Call CHEX (CE)", marker_color="#00E676"))
             fig_chex.update_layout(barmode='group')
-        st.plotly_chart(apply_dark_layout(fig_chex, 250, True, df_chart_view, atm_strike), use_container_width=True, config=PLOT_CONFIG)
+            fig_chex.update_xaxes(range=[atm_strike - 350, atm_strike + 350], tickformat="d")
+        st.plotly_chart(apply_dark_layout(fig_chex, 250, True, df_chart_view, atm_strike), use_container_width=True, config=PLOT_CONFIG, key="chart_chex")
         st.markdown('</div>', unsafe_allow_html=True)
     with e4:
         st.markdown('<div class="chart-container"><div class="chart-title">Tradytics Speed Exposure (SPEX)</div>', unsafe_allow_html=True)
@@ -872,7 +889,8 @@ with tab2: # GREEK EXPOSURES
             fig_spex.add_trace(go.Bar(x=df_chart_view["Strike"], y=df_chart_view["PE_SPEX"], name="Put SPEX (PE)", marker_color="#FF5252"))
             fig_spex.add_trace(go.Bar(x=df_chart_view["Strike"], y=df_chart_view["CE_SPEX"], name="Call SPEX (CE)", marker_color="#00E676"))
             fig_spex.update_layout(barmode='group')
-        st.plotly_chart(apply_dark_layout(fig_spex, 250, True, df_chart_view, atm_strike), use_container_width=True, config=PLOT_CONFIG)
+            fig_spex.update_xaxes(range=[atm_strike - 350, atm_strike + 350], tickformat="d")
+        st.plotly_chart(apply_dark_layout(fig_spex, 250, True, df_chart_view, atm_strike), use_container_width=True, config=PLOT_CONFIG, key="chart_spex")
         st.markdown('</div>', unsafe_allow_html=True)
 
 with tab3: # INTRADAY & ADVANCED ANALYTICS
@@ -884,14 +902,14 @@ with tab3: # INTRADAY & ADVANCED ANALYTICS
             strike_history = iv_hist[iv_hist["Strike"] == selected_target_strike]
             if not strike_history.empty: fig_ts.add_trace(go.Scatter(x=strike_history["Time"], y=strike_history["IV_Spread"], mode="lines+markers", line=dict(color="#29B6F6", width=2), marker=dict(size=3)))
         fig_ts.add_hline(y=0, line_dash="dash", line_color="white", opacity=0.3)
-        st.plotly_chart(apply_dark_layout(fig_ts), use_container_width=True, config=PLOT_CONFIG)
+        st.plotly_chart(apply_dark_layout(fig_ts), use_container_width=True, config=PLOT_CONFIG, key="chart_iv_spread")
         st.markdown('</div>', unsafe_allow_html=True)
     with r1c2:
         st.markdown('<div class="chart-container"><div class="chart-title">15-Min PCR Velocity (ΔPCR)</div>', unsafe_allow_html=True)
         fig_pcr = go.Figure()
         if not pcr_df.empty: fig_pcr.add_trace(go.Bar(x=pcr_df["Time"], y=pcr_df["Delta_PCR_15m"], marker_color=["#00E676" if v >= 0.15 else ("#FF5252" if v <= -0.15 else "#8A93A6") for v in pcr_df["Delta_PCR_15m"]]))
         fig_pcr.add_hline(y=0.15, line_dash="dash", line_color="#00E676"); fig_pcr.add_hline(y=-0.15, line_dash="dash", line_color="#FF5252")
-        st.plotly_chart(apply_dark_layout(fig_pcr), use_container_width=True, config=PLOT_CONFIG)
+        st.plotly_chart(apply_dark_layout(fig_pcr), use_container_width=True, config=PLOT_CONFIG, key="chart_pcr_vel")
         st.markdown('</div>', unsafe_allow_html=True)
 
     r2c1, r2c2 = st.columns(2)
@@ -902,7 +920,7 @@ with tab3: # INTRADAY & ADVANCED ANALYTICS
             fig_oi_trend.add_trace(go.Scatter(x=pcr_df["Time"], y=pcr_df["Total_PE_OI"]/1e7, mode="lines", name="Put OI (PE)", line=dict(color="#FF5252", width=2)))
             fig_oi_trend.add_trace(go.Scatter(x=pcr_df["Time"], y=pcr_df["Total_CE_OI"]/1e7, mode="lines", name="Call OI (CE)", line=dict(color="#00E676", width=2)))
             fig_oi_trend.add_trace(go.Scatter(x=pcr_df["Time"], y=(pcr_df["Total_PE_OI"]-pcr_df["Total_CE_OI"])/1e7, mode="lines", name="PE-CE Diff", line=dict(color="#AB47BC", width=2)))
-        st.plotly_chart(apply_dark_layout(fig_oi_trend), use_container_width=True, config=PLOT_CONFIG)
+        st.plotly_chart(apply_dark_layout(fig_oi_trend), use_container_width=True, config=PLOT_CONFIG, key="chart_oi_cum_trend")
         st.markdown('</div>', unsafe_allow_html=True)
     with r2c2:
         st.markdown('<div class="chart-container"><div class="chart-title">Intraday PCR & Vol PCR Trend</div>', unsafe_allow_html=True)
@@ -910,7 +928,7 @@ with tab3: # INTRADAY & ADVANCED ANALYTICS
         if not pcr_df.empty:
             fig_pcr_t.add_trace(go.Scatter(x=pcr_df["Time"], y=pcr_df["PCR"], mode="lines", name="OI PCR", line=dict(color="#29B6F6", width=2)))
             if "Vol_PCR" in pcr_df.columns: fig_pcr_t.add_trace(go.Scatter(x=pcr_df["Time"], y=pcr_df["Vol_PCR"], mode="lines", name="Vol PCR", line=dict(color="#FFA726", width=2)))
-        st.plotly_chart(apply_dark_layout(fig_pcr_t), use_container_width=True, config=PLOT_CONFIG)
+        st.plotly_chart(apply_dark_layout(fig_pcr_t), use_container_width=True, config=PLOT_CONFIG, key="chart_pcr_trend")
         st.markdown('</div>', unsafe_allow_html=True)
 
     r3c1, r3c2 = st.columns(2)
@@ -920,7 +938,7 @@ with tab3: # INTRADAY & ADVANCED ANALYTICS
         fig_doi = go.Figure()
         if not doi_df.empty: fig_doi.add_trace(go.Scatter(x=doi_df["Time"], y=doi_df["Total_Net_Delta_OI"], mode="lines", fill='tozeroy', line=dict(color="#00E676", width=2)))
         fig_doi.add_hline(y=0, line_dash="dash", line_color="white", opacity=0.3)
-        st.plotly_chart(apply_dark_layout(fig_doi), use_container_width=True, config=PLOT_CONFIG)
+        st.plotly_chart(apply_dark_layout(fig_doi), use_container_width=True, config=PLOT_CONFIG, key="chart_net_doi")
         st.markdown('</div>', unsafe_allow_html=True)
     with r3c2:
         st.markdown('<div class="chart-container"><div class="chart-title">Dealer Delta Velocity (DEX 5m ROC)</div>', unsafe_allow_html=True)
@@ -928,7 +946,7 @@ with tab3: # INTRADAY & ADVANCED ANALYTICS
         fig_dvel = go.Figure()
         if not doi_df.empty: fig_dvel.add_trace(go.Bar(x=doi_df["Time"], y=doi_df["DEX_Vel_5m"], marker_color=["#00E676" if v >= 0 else "#FF5252" for v in doi_df["DEX_Vel_5m"]]))
         fig_dvel.add_hline(y=0, line_dash="dash", line_color="white", opacity=0.3)
-        st.plotly_chart(apply_dark_layout(fig_dvel), use_container_width=True, config=PLOT_CONFIG)
+        st.plotly_chart(apply_dark_layout(fig_dvel), use_container_width=True, config=PLOT_CONFIG, key="chart_dex_vel")
         st.markdown('</div>', unsafe_allow_html=True)
 
     a1, a2 = st.columns(2)
@@ -939,7 +957,7 @@ with tab3: # INTRADAY & ADVANCED ANALYTICS
             fig_pcp.add_trace(go.Bar(x=synth_df["Time"], y=synth_df["PCP_Dev_Mean"], marker_color=["#00E676" if v > 0 else "#FF5252" for v in synth_df["PCP_Dev_Mean"]]))
         fig_pcp.add_hline(y=3.0, line_dash="dash", line_color="#00E676", annotation_text="+3.0 Call Squeeze")
         fig_pcp.add_hline(y=-3.0, line_dash="dash", line_color="#FF5252", annotation_text="-3.0 Put Squeeze")
-        st.plotly_chart(apply_dark_layout(fig_pcp), use_container_width=True, config=PLOT_CONFIG)
+        st.plotly_chart(apply_dark_layout(fig_pcp), use_container_width=True, config=PLOT_CONFIG, key="chart_pcp_dev")
         st.markdown('</div>', unsafe_allow_html=True)
     with a2:
         st.markdown('<div class="chart-container"><div class="chart-title">Multi-Strike Synthetic Parity Engine</div>', unsafe_allow_html=True)
@@ -949,7 +967,7 @@ with tab3: # INTRADAY & ADVANCED ANALYTICS
             fig_synth.add_trace(go.Scatter(x=synth_df["Time"], y=synth_df["Synth_M50"], mode="lines", name="ITM Synth", line=dict(color="#00E676", width=1.5, dash="dot")))
             fig_synth.add_trace(go.Scatter(x=synth_df["Time"], y=synth_df["Synth_ATM"], mode="lines", name="ATM Synth", line=dict(color="#29B6F6", width=1.5, dash="dot")))
             fig_synth.add_trace(go.Scatter(x=synth_df["Time"], y=synth_df["Synth_P50"], mode="lines", name="OTM Synth", line=dict(color="#FF5252", width=1.5, dash="dot")))
-        st.plotly_chart(apply_dark_layout(fig_synth), use_container_width=True, config=PLOT_CONFIG)
+        st.plotly_chart(apply_dark_layout(fig_synth), use_container_width=True, config=PLOT_CONFIG, key="chart_synth_engine")
         st.markdown('</div>', unsafe_allow_html=True)
 
     a3, a4 = st.columns(2)
@@ -964,7 +982,7 @@ with tab3: # INTRADAY & ADVANCED ANALYTICS
                 fig_fyers_strad.add_trace(go.Scatter(x=synth_df["Time"], y=synth_df["Spot"], mode="lines", name="Nifty Price", line=dict(color="#29B6F6", width=1.5, dash="dash")), secondary_y=True)
         fig_fyers_strad.update_yaxes(title_text="Straddle Premium (₹)", secondary_y=False, gridcolor="#2A2E39")
         fig_fyers_strad.update_yaxes(title_text="Nifty Price", secondary_y=True, showgrid=False)
-        st.plotly_chart(apply_dark_layout(fig_fyers_strad), use_container_width=True, config=PLOT_CONFIG)
+        st.plotly_chart(apply_dark_layout(fig_fyers_strad), use_container_width=True, config=PLOT_CONFIG, key="chart_fyers_strad")
         st.markdown('</div>', unsafe_allow_html=True)
     with a4:
         st.markdown('<div class="chart-container"><div class="chart-title">Gamma Flip Migration (ΔFlip)</div>', unsafe_allow_html=True)
@@ -972,7 +990,7 @@ with tab3: # INTRADAY & ADVANCED ANALYTICS
         if not gex_df.empty:
             fig_flip.add_trace(go.Scatter(x=gex_df["Time"], y=gex_df["Spot"], mode="lines", name="Spot", line=dict(color="#FFD700", width=2)))
             fig_flip.add_trace(go.Scatter(x=gex_df["Time"], y=gex_df["Flip_Strike"], mode="lines", name="Flip Level", line=dict(color="#29B6F6", width=2, dash="dash")))
-        st.plotly_chart(apply_dark_layout(fig_flip), use_container_width=True, config=PLOT_CONFIG)
+        st.plotly_chart(apply_dark_layout(fig_flip), use_container_width=True, config=PLOT_CONFIG, key="chart_gex_flip_mig")
         st.markdown('</div>', unsafe_allow_html=True)
 
 with tab4: # OPENBULL & FYERS SKEW
@@ -986,7 +1004,7 @@ with tab4: # OPENBULL & FYERS SKEW
                 fig_macro.add_trace(go.Scatter(x=gex_df["Time"], y=gex_df["Spot"], mode="lines", name="Nifty Price", line=dict(color="#FF5252", width=2)), secondary_y=True)
         fig_macro.update_yaxes(title_text="PCR", secondary_y=False, gridcolor="#2A2E39")
         fig_macro.update_yaxes(title_text="Nifty Price", secondary_y=True, showgrid=False)
-        st.plotly_chart(apply_dark_layout(fig_macro), use_container_width=True, config=PLOT_CONFIG)
+        st.plotly_chart(apply_dark_layout(fig_macro), use_container_width=True, config=PLOT_CONFIG, key="chart_macro_pcr")
         st.markdown('</div>', unsafe_allow_html=True)
 
     with f2:
@@ -1004,7 +1022,7 @@ with tab4: # OPENBULL & FYERS SKEW
                 fig_ms_iv.add_trace(go.Scatter(x=synth_df["Time"], y=synth_df["Spot"], mode="lines", name="Nifty Price", line=dict(color="#29B6F6", width=2)), secondary_y=True)
         fig_ms_iv.update_yaxes(title_text="Implied Volatility (%)", secondary_y=False, gridcolor="#2A2E39")
         fig_ms_iv.update_yaxes(title_text="Nifty Price", secondary_y=True, showgrid=False)
-        st.plotly_chart(apply_dark_layout(fig_ms_iv, 300), use_container_width=True, config=PLOT_CONFIG)
+        st.plotly_chart(apply_dark_layout(fig_ms_iv, 300), use_container_width=True, config=PLOT_CONFIG, key="chart_ms_iv")
         st.markdown('</div>', unsafe_allow_html=True)
 
     v1, v2 = st.columns(2)
@@ -1015,7 +1033,7 @@ with tab4: # OPENBULL & FYERS SKEW
             fig_smile.add_trace(go.Scatter(x=df_chart_view["Strike"], y=df_chart_view["PE_IV"], mode="lines+markers", name="Put IV (PE)", line=dict(color="#FF5252", width=2)))
             fig_smile.add_trace(go.Scatter(x=df_chart_view["Strike"], y=df_chart_view["CE_IV"], mode="lines+markers", name="Call IV (CE)", line=dict(color="#00E676", width=2)))
             fig_smile.add_vline(x=spot_price, line_dash="solid", line_color="#FFD700")
-        st.plotly_chart(apply_dark_layout(fig_smile, 250, True, df_chart_view, atm_strike), use_container_width=True, config=PLOT_CONFIG)
+        st.plotly_chart(apply_dark_layout(fig_smile, 250, True, df_chart_view, atm_strike), use_container_width=True, config=PLOT_CONFIG, key="chart_iv_smile")
         st.markdown('</div>', unsafe_allow_html=True)
         
     with v2:
@@ -1027,7 +1045,7 @@ with tab4: # OPENBULL & FYERS SKEW
             pivot_surface = df_surface.pivot_table(index='Days', columns='Strike', values='IV', aggfunc='mean').ffill(axis=1).bfill(axis=1).fillna(0)
             fig_surf = go.Figure(data=[go.Surface(z=pivot_surface.values, x=pivot_surface.columns.tolist(), y=pivot_surface.index.tolist(), colorscale='Viridis', showscale=False)])
             fig_surf.update_layout(scene=dict(xaxis_title='Strike', yaxis_title='Days to Expiry', zaxis_title='Implied Vol'), template="plotly_dark", margin=dict(l=0,r=0,t=0,b=0), height=250)
-            st.plotly_chart(fig_surf, use_container_width=True, config=PLOT_CONFIG)
+            st.plotly_chart(fig_surf, use_container_width=True, config=PLOT_CONFIG, key="chart_3d_surf")
         else: st.info("Loading Expiries for 3D Surface... (Requires 0.6 seconds)")
         st.markdown('</div>', unsafe_allow_html=True)
 
