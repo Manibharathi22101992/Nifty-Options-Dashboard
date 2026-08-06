@@ -57,7 +57,7 @@ if not CLIENT_ID or not ACCESS_TOKEN:
 NIFTY_LOT_SIZE = 65
 NIFTY_DIVIDEND_YIELD = 0.012  
 RISK_FREE_RATE = 0.07         
-PLOT_CONFIG = {'displayModeBar': True, 'scrollZoom': False}
+PLOT_CONFIG = {'displayModeBar': False, 'scrollZoom': False, 'showAxisDragHandles': False}
 
 try:
     import yfinance as yf
@@ -145,13 +145,22 @@ def fmt_num(val):
     return f"{sign}{abs_val:.0f}"
 
 def apply_dark_layout(fig, height=250, is_strike_axis=False, df_filtered=None, atm_strike=None):
-    fig.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", margin=dict(l=5, r=5, t=20, b=5), height=height, legend=dict(orientation="h", y=1.1, x=0, font=dict(size=10)), bargap=0.15)
+    fig.update_layout(
+        template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", 
+        margin=dict(l=5, r=5, t=20, b=5), height=height, 
+        legend=dict(orientation="h", y=1.1, x=0, font=dict(size=10)), 
+        bargap=0.15, dragmode=False # dragmode=False allows mobile page scrolling!
+    )
     
     if is_strike_axis and df_filtered is not None and not df_filtered.empty:
         # Absolutely forces Plotly to render exact integers (e.g., 24200 instead of 24.2k)
         strikes = df_filtered["Strike"].astype(int).tolist()
         strike_strs = [str(x) for x in strikes]
-        fig.update_xaxes(tickmode='array', tickvals=strikes, ticktext=strike_strs, tickangle=-45, gridcolor="#2A2E39", zerolinecolor="#2A2E39", tickfont=dict(size=10, color="#D1D4DC"))
+        fig.update_xaxes(
+            type='linear', tickmode='array', tickvals=strikes, ticktext=strike_strs, 
+            tickangle=-45, gridcolor="#2A2E39", zerolinecolor="#2A2E39", 
+            tickfont=dict(size=10, color="#D1D4DC"), tickformat="d"
+        )
     else:
         fig.update_xaxes(gridcolor="#2A2E39", zerolinecolor="#2A2E39", tickfont=dict(size=10))
         
@@ -162,7 +171,7 @@ def create_h_bar(title, put_val, call_val, interp_text="", interp_color="#8A93A6
     fig = go.Figure()
     fig.add_trace(go.Bar(x=[put_val], y=[''], name='Put (PE)', orientation='h', marker_color="#FF5252", text=f"{put_val:,.0f}", textposition='inside', insidetextanchor='end'))
     fig.add_trace(go.Bar(x=[call_val], y=[''], name='Call (CE)', orientation='h', marker_color="#00E676", text=f"{call_val:,.0f}", textposition='inside', insidetextanchor='start'))
-    fig.update_layout(title=dict(text=f"<b>{title}</b><br><span style='color:{interp_color}; font-size:10px; font-weight:700;'>{interp_text}</span>", font=dict(size=11, color="#8A93A6"), x=0.5, xanchor='center'), barmode='group', margin=dict(l=0, r=0, t=35, b=0), height=85, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", showlegend=False, xaxis=dict(visible=False), yaxis=dict(visible=False), bargap=0.2)
+    fig.update_layout(title=dict(text=f"<b>{title}</b><br><span style='color:{interp_color}; font-size:10px; font-weight:700;'>{interp_text}</span>", font=dict(size=11, color="#8A93A6"), x=0.5, xanchor='center'), barmode='group', margin=dict(l=0, r=0, t=35, b=0), height=85, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", showlegend=False, xaxis=dict(visible=False), yaxis=dict(visible=False), bargap=0.2, dragmode=False)
     return fig
 
 def get_oi_build_status(dl_p, dl_oi, is_call):
@@ -305,12 +314,8 @@ def fetch_gex_option_chain_raw(expiry_date):
         oc_raw = data.get("data", {}).get("oc", {})
         if not oc_raw: return get_empty_oc_df(), spot_price, "Empty options chain."
 
-        try: 
-            clean_date = str(expiry_date).replace(".", "-").strip()
-            exp_date_obj = pd.to_datetime(clean_date, dayfirst=True).date()
-        except: 
-            exp_date_obj = datetime.date.today() + datetime.timedelta(days=1)
-            
+        try: exp_date_obj = pd.to_datetime(str(expiry_date)[:10]).date()
+        except: exp_date_obj = datetime.date.today() + datetime.timedelta(days=1)
         T_years = max((exp_date_obj - datetime.date.today()).days, 0.5) / 365.0
         
         records = []
@@ -368,9 +373,10 @@ def fetch_gex_option_chain_raw(expiry_date):
         return get_empty_oc_df(), 0.0, err_msg
 
 @st.cache_data(ttl=120, show_spinner=False)
-def fetch_multi_expiry_vol_structure(spot_price, valid_exp_list):
+def fetch_multi_expiry_vol_structure(valid_exp_tuple):
+    """Fetches volatility curve. Tuple input prevents unhashable list errors."""
     vol_data, surface_data = [], []
-    for idx, exp in enumerate(valid_exp_list):
+    for idx, exp in enumerate(valid_exp_tuple):
         if idx > 0: time.sleep(0.1) # Fast non-blocking fetch
         df_exp, exp_spot, _ = fetch_gex_option_chain_raw(exp)
         if not df_exp.empty:
@@ -380,14 +386,12 @@ def fetch_multi_expiry_vol_structure(spot_price, valid_exp_list):
             
             try: 
                 # Strict parser prevents '09 Jan' bug
-                clean_str = str(exp).replace(".", "-").strip()
-                exp_date_obj = pd.to_datetime(clean_str, dayfirst=True).date()
+                exp_date_obj = pd.to_datetime(exp).date()
             except: 
                 continue
             
             days = (exp_date_obj - datetime.date.today()).days
-            if days < 0:
-                continue # Block past dates entirely
+            if days < 0: continue # Block past dates entirely
                 
             tenor_years = max(days, 0.5) / 365.0
             vol_data.append({"Expiry": exp_date_obj.strftime("%d %b"), "Days": days, "Tenor_Years": tenor_years, "Mean_IV": max(mean_iv, 0.01)})
@@ -501,7 +505,7 @@ if not STORE["valid_expiries"]:
     except Exception as e: log_error(f"Expiry Fetch Failed: {e}")
 
 valid_expiries = STORE["valid_expiries"]
-selected_expiry = st.sidebar.selectbox("Primary Expiry", valid_expiries) if valid_expiries else st.sidebar.date_input("Primary Expiry").strftime("%d-%m-%Y")
+selected_expiry = st.sidebar.selectbox("Primary Expiry", valid_expiries) if valid_expiries else st.sidebar.date_input("Primary Expiry").strftime("%Y-%m-%d")
 GLOBAL_STATE["selected_expiry"] = selected_expiry
 
 start_background_daemon()
@@ -560,7 +564,7 @@ st.markdown(f"""
 # ---------------------------------------------------------
 # 7. METRICS COMPILATION
 # ---------------------------------------------------------
-try: exp_date = pd.to_datetime(str(selected_expiry).replace(".", "-").strip()[:10], dayfirst=True).date()
+try: exp_date = pd.to_datetime(selected_expiry).date()
 except: exp_date = datetime.date.today() + datetime.timedelta(days=1)
 T_years = max((exp_date - datetime.date.today()).days, 0.5) / 365.0
 
@@ -716,7 +720,7 @@ with tab1: # PRINCE ANALYSIS
     with v1:
         st.markdown('<div class="chart-container"><div class="chart-title">Forward Vol Term Structure (Active + 3 Expiries)</div>', unsafe_allow_html=True)
         exp_list = [selected_expiry] + [x for x in valid_expiries if x != selected_expiry][:3]
-        df_vol_struct, df_surface = fetch_multi_expiry_vol_structure(spot_price, exp_list)
+        df_vol_struct, df_surface = fetch_multi_expiry_vol_structure(tuple(exp_list))
         
         if not df_vol_struct.empty and len(df_vol_struct) >= 2:
             is_backwardation = df_vol_struct.iloc[0]["Mean_IV"] > df_vol_struct.iloc[-1]["Mean_IV"]
@@ -739,6 +743,7 @@ with tab1: # PRINCE ANALYSIS
             fig_iv_price.add_trace(go.Scatter(x=sorted_atm_iv["Datetime"], y=sorted_atm_iv["Spot"], mode="lines", name="Price", line=dict(color="#FF5252", width=2)), secondary_y=True)
         fig_iv_price.update_yaxes(title_text="ATM IV (%)", secondary_y=False, gridcolor="#2A2E39")
         fig_iv_price.update_yaxes(title_text="Nifty Price", secondary_y=True, showgrid=False)
+        fig_iv_price.update_xaxes(type="date", tickformat="%H:%M")
         st.plotly_chart(apply_dark_layout(fig_iv_price), use_container_width=True, config=PLOT_CONFIG, key="chart_atm_iv_spot")
         st.markdown('</div>', unsafe_allow_html=True)
 
@@ -937,6 +942,7 @@ with tab3: # INTRADAY & ADVANCED ANALYTICS
                 strike_history_dt = get_sorted_dt(strike_history)
                 fig_ts.add_trace(go.Scatter(x=strike_history_dt["Datetime"], y=strike_history_dt["IV_Spread"], mode="lines+markers", line=dict(color="#29B6F6", width=2), marker=dict(size=3)))
         fig_ts.add_hline(y=0, line_dash="dash", line_color="white", opacity=0.3)
+        fig_ts.update_xaxes(type="date", tickformat="%H:%M")
         st.plotly_chart(apply_dark_layout(fig_ts), use_container_width=True, config=PLOT_CONFIG, key="chart_iv_spread")
         st.markdown('</div>', unsafe_allow_html=True)
     with r1c2:
@@ -946,6 +952,7 @@ with tab3: # INTRADAY & ADVANCED ANALYTICS
             pcr_df_dt = get_sorted_dt(pcr_df)
             fig_pcr.add_trace(go.Bar(x=pcr_df_dt["Datetime"], y=pcr_df_dt["Delta_PCR_15m"], marker_color=["#00E676" if v >= 0.15 else ("#FF5252" if v <= -0.15 else "#8A93A6") for v in pcr_df_dt["Delta_PCR_15m"]]))
         fig_pcr.add_hline(y=0.15, line_dash="dash", line_color="#00E676"); fig_pcr.add_hline(y=-0.15, line_dash="dash", line_color="#FF5252")
+        fig_pcr.update_xaxes(type="date", tickformat="%H:%M")
         st.plotly_chart(apply_dark_layout(fig_pcr), use_container_width=True, config=PLOT_CONFIG, key="chart_pcr_vel")
         st.markdown('</div>', unsafe_allow_html=True)
 
@@ -958,6 +965,7 @@ with tab3: # INTRADAY & ADVANCED ANALYTICS
             fig_oi_trend.add_trace(go.Scatter(x=pcr_df_dt["Datetime"], y=pcr_df_dt["Total_PE_OI"]/1e7, mode="lines", name="Put OI (PE)", line=dict(color="#FF5252", width=2)))
             fig_oi_trend.add_trace(go.Scatter(x=pcr_df_dt["Datetime"], y=pcr_df_dt["Total_CE_OI"]/1e7, mode="lines", name="Call OI (CE)", line=dict(color="#00E676", width=2)))
             fig_oi_trend.add_trace(go.Scatter(x=pcr_df_dt["Datetime"], y=(pcr_df_dt["Total_PE_OI"]-pcr_df_dt["Total_CE_OI"])/1e7, mode="lines", name="PE-CE Diff", line=dict(color="#AB47BC", width=2)))
+        fig_oi_trend.update_xaxes(type="date", tickformat="%H:%M")
         st.plotly_chart(apply_dark_layout(fig_oi_trend), use_container_width=True, config=PLOT_CONFIG, key="chart_oi_cum_trend")
         st.markdown('</div>', unsafe_allow_html=True)
     with r2c2:
@@ -967,6 +975,7 @@ with tab3: # INTRADAY & ADVANCED ANALYTICS
             pcr_df_dt = get_sorted_dt(pcr_df)
             fig_pcr_t.add_trace(go.Scatter(x=pcr_df_dt["Datetime"], y=pcr_df_dt["PCR"], mode="lines", name="OI PCR", line=dict(color="#29B6F6", width=2)))
             if "Vol_PCR" in pcr_df_dt.columns: fig_pcr_t.add_trace(go.Scatter(x=pcr_df_dt["Datetime"], y=pcr_df_dt["Vol_PCR"], mode="lines", name="Vol PCR", line=dict(color="#FFA726", width=2)))
+        fig_pcr_t.update_xaxes(type="date", tickformat="%H:%M")
         st.plotly_chart(apply_dark_layout(fig_pcr_t), use_container_width=True, config=PLOT_CONFIG, key="chart_pcr_trend")
         st.markdown('</div>', unsafe_allow_html=True)
 
@@ -979,6 +988,7 @@ with tab3: # INTRADAY & ADVANCED ANALYTICS
             doi_df_dt = get_sorted_dt(doi_df)
             fig_doi.add_trace(go.Scatter(x=doi_df_dt["Datetime"], y=doi_df_dt["Total_Net_Delta_OI"], mode="lines", fill='tozeroy', line=dict(color="#00E676", width=2)))
         fig_doi.add_hline(y=0, line_dash="dash", line_color="white", opacity=0.3)
+        fig_doi.update_xaxes(type="date", tickformat="%H:%M")
         st.plotly_chart(apply_dark_layout(fig_doi), use_container_width=True, config=PLOT_CONFIG, key="chart_net_doi")
         st.markdown('</div>', unsafe_allow_html=True)
     with r3c2:
@@ -989,6 +999,7 @@ with tab3: # INTRADAY & ADVANCED ANALYTICS
             doi_df_dt = get_sorted_dt(doi_df)
             fig_dvel.add_trace(go.Bar(x=doi_df_dt["Datetime"], y=doi_df_dt["DEX_Vel_5m"], marker_color=["#00E676" if v >= 0 else "#FF5252" for v in doi_df_dt["DEX_Vel_5m"]]))
         fig_dvel.add_hline(y=0, line_dash="dash", line_color="white", opacity=0.3)
+        fig_dvel.update_xaxes(type="date", tickformat="%H:%M")
         st.plotly_chart(apply_dark_layout(fig_dvel), use_container_width=True, config=PLOT_CONFIG, key="chart_dex_vel")
         st.markdown('</div>', unsafe_allow_html=True)
 
@@ -1001,6 +1012,7 @@ with tab3: # INTRADAY & ADVANCED ANALYTICS
             fig_pcp.add_trace(go.Bar(x=synth_df_dt["Datetime"], y=synth_df_dt["PCP_Dev_Mean"], marker_color=["#00E676" if v > 0 else "#FF5252" for v in synth_df_dt["PCP_Dev_Mean"]]))
         fig_pcp.add_hline(y=3.0, line_dash="dash", line_color="#00E676", annotation_text="+3.0 Call Squeeze")
         fig_pcp.add_hline(y=-3.0, line_dash="dash", line_color="#FF5252", annotation_text="-3.0 Put Squeeze")
+        fig_pcp.update_xaxes(type="date", tickformat="%H:%M")
         st.plotly_chart(apply_dark_layout(fig_pcp), use_container_width=True, config=PLOT_CONFIG, key="chart_pcp_dev")
         st.markdown('</div>', unsafe_allow_html=True)
     with a2:
@@ -1012,6 +1024,7 @@ with tab3: # INTRADAY & ADVANCED ANALYTICS
             fig_synth.add_trace(go.Scatter(x=synth_df_dt["Datetime"], y=synth_df_dt["Synth_M50"], mode="lines", name="ITM Synth", line=dict(color="#00E676", width=1.5, dash="dot")))
             fig_synth.add_trace(go.Scatter(x=synth_df_dt["Datetime"], y=synth_df_dt["Synth_ATM"], mode="lines", name="ATM Synth", line=dict(color="#29B6F6", width=1.5, dash="dot")))
             fig_synth.add_trace(go.Scatter(x=synth_df_dt["Datetime"], y=synth_df_dt["Synth_P50"], mode="lines", name="OTM Synth", line=dict(color="#FF5252", width=1.5, dash="dot")))
+        fig_synth.update_xaxes(type="date", tickformat="%H:%M")
         st.plotly_chart(apply_dark_layout(fig_synth), use_container_width=True, config=PLOT_CONFIG, key="chart_synth_engine")
         st.markdown('</div>', unsafe_allow_html=True)
 
@@ -1029,6 +1042,7 @@ with tab3: # INTRADAY & ADVANCED ANALYTICS
                 fig_fyers_strad.add_trace(go.Scatter(x=synth_df_dt["Datetime"], y=synth_df_dt["Spot"], mode="lines", name="Nifty Price", line=dict(color="#29B6F6", width=1.5, dash="dash")), secondary_y=True)
         fig_fyers_strad.update_yaxes(title_text="Straddle Premium (₹)", secondary_y=False, gridcolor="#2A2E39")
         fig_fyers_strad.update_yaxes(title_text="Nifty Price", secondary_y=True, showgrid=False)
+        fig_fyers_strad.update_xaxes(type="date", tickformat="%H:%M")
         st.plotly_chart(apply_dark_layout(fig_fyers_strad), use_container_width=True, config=PLOT_CONFIG, key="chart_fyers_strad")
         st.markdown('</div>', unsafe_allow_html=True)
     with a4:
@@ -1038,6 +1052,7 @@ with tab3: # INTRADAY & ADVANCED ANALYTICS
             gex_df_dt = get_sorted_dt(gex_df)
             fig_flip.add_trace(go.Scatter(x=gex_df_dt["Datetime"], y=gex_df_dt["Spot"], mode="lines", name="Spot", line=dict(color="#FFD700", width=2)))
             fig_flip.add_trace(go.Scatter(x=gex_df_dt["Datetime"], y=gex_df_dt["Flip_Strike"], mode="lines", name="Flip Level", line=dict(color="#29B6F6", width=2, dash="dash")))
+        fig_flip.update_xaxes(type="date", tickformat="%H:%M")
         st.plotly_chart(apply_dark_layout(fig_flip), use_container_width=True, config=PLOT_CONFIG, key="chart_gex_flip_mig")
         st.markdown('</div>', unsafe_allow_html=True)
 
@@ -1054,6 +1069,7 @@ with tab4: # OPENBULL & FYERS SKEW
                 fig_macro.add_trace(go.Scatter(x=gex_df_dt["Datetime"], y=gex_df_dt["Spot"], mode="lines", name="Nifty Price", line=dict(color="#FF5252", width=2)), secondary_y=True)
         fig_macro.update_yaxes(title_text="PCR", secondary_y=False, gridcolor="#2A2E39")
         fig_macro.update_yaxes(title_text="Nifty Price", secondary_y=True, showgrid=False)
+        fig_macro.update_xaxes(type="date", tickformat="%H:%M")
         st.plotly_chart(apply_dark_layout(fig_macro), use_container_width=True, config=PLOT_CONFIG, key="chart_macro_pcr")
         st.markdown('</div>', unsafe_allow_html=True)
 
@@ -1074,6 +1090,7 @@ with tab4: # OPENBULL & FYERS SKEW
                 fig_ms_iv.add_trace(go.Scatter(x=synth_df_dt["Datetime"], y=synth_df_dt["Spot"], mode="lines", name="Nifty Price", line=dict(color="#29B6F6", width=2)), secondary_y=True)
         fig_ms_iv.update_yaxes(title_text="Implied Volatility (%)", secondary_y=False, gridcolor="#2A2E39")
         fig_ms_iv.update_yaxes(title_text="Nifty Price", secondary_y=True, showgrid=False)
+        fig_ms_iv.update_xaxes(type="date", tickformat="%H:%M")
         st.plotly_chart(apply_dark_layout(fig_ms_iv, 300), use_container_width=True, config=PLOT_CONFIG, key="chart_ms_iv")
         st.markdown('</div>', unsafe_allow_html=True)
 
@@ -1092,7 +1109,7 @@ with tab4: # OPENBULL & FYERS SKEW
         st.markdown('<div class="chart-container"><div class="chart-title">OpenBull 3D Volatility Surface</div>', unsafe_allow_html=True)
         st.markdown('<div class="interp-box">💡 <b>3D Vol Skew Surface:</b> Visualizes IV across Strike (X) and Days (Y). Peaks indicate localized options demand.</div>', unsafe_allow_html=True)
         exp_list_surf = [selected_expiry] + [x for x in valid_expiries if x != selected_expiry][:3]
-        _, df_surface = fetch_multi_expiry_vol_structure(spot_price, exp_list_surf)
+        _, df_surface = fetch_multi_expiry_vol_structure(tuple(exp_list_surf))
         if not df_surface.empty:
             pivot_surface = df_surface.pivot_table(index='Days', columns='Strike', values='IV', aggfunc='mean').ffill(axis=1).bfill(axis=1).fillna(0)
             fig_surf = go.Figure(data=[go.Surface(z=pivot_surface.values, x=pivot_surface.columns.tolist(), y=pivot_surface.index.tolist(), colorscale='Viridis', showscale=False)])
